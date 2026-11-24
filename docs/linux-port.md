@@ -114,6 +114,42 @@ evidence; they are ours, not game data).
 (previously it only dropped the draws), which keeps a pipeline that a driver
 crashes on out of the process entirely. Diagnostics only.
 
+### Where a run gets to (measured 2026-11-24, RX 9070 XT)
+
+Menus, the first-boot screens, loading art and the first mission's credits
+card render. The world is reached (the title's own crash report shows a player
+at health 130/130, mission `fbk_stry000_FBK_STRY000_INTRO`), but the 3D scene
+is black and the run ends after about 9 minutes in the title's deliberate
+breakpoint at `+0x5149aec` (`0x80000003`):
+
+```
+Frame: 1462        Game Running Time: 0h:8m:50s    Paused: Yes
+INSTANCE_LIST: 45000/45000    BUILDING: 22487/22500
+Current SRL State: Prestream
+```
+
+That is issue #698 exactly (same frame, stack, pool state and `Prestream`),
+reported on Windows/NVIDIA: the title asserts when its instance pool fills
+because the intro's prestream does not finish at 0.2-1.5 fps. It is parity
+with Windows, not a Linux-specific fault. Series S reaches the same assert
+(8m51, frame 1576, `INSTANCE_LIST` full) with `Paused: No`, so the pause is
+not the trigger. `VICTORY_NO_WATCHDOG=1` (the #454 hook, cherry-picked here)
+is required to get this far; without it the title's stall watchdog kills the
+process at `+0x2215c35` first. The series-X numbers were reported on #698.
+
+Rendering gaps, ranked from a world run: 126 shaders do not translate. The
+two error classes that cost the most draws are "a scalar memory read as data"
+(upstream #979) and "an address in an SGPR that is no root parameter"
+(upstream #798); 1,835 compute draw summaries per run are dropped for them.
+`VICTORY_DEBUG_PS=1` renders 2D front-end art normally but does not make the
+3D scene visible, so the missing geometry is in the untranslated mesh/compute
+programs rather than in the pixel shaders.
+
+Frame times: 5-30 fps in menus, 1-2 fps while loading, 0.2-0.5 fps in the
+world; copies of title memory take 1.2-4.5 s per frame (100-500 MB) under
+Wine. No save file exists yet: only settings are written, because the intro
+never hands over control.
+
 Expected trouble that has not appeared yet: device creation and feature level,
 swapchain/presentation (solved by DXVK), 64-lane waves, 64-bit atomics,
 console texture tilings. Observed but not fatal: descriptor heaps larger than
@@ -183,16 +219,23 @@ unless Phase 0 hits something Wine cannot be made to do.
 
 | # | Milestone | Route | State |
 |---|-----------|-------|-------|
-| M0 | Prefix boots the title to the start screen | A | boot and picker work at 30 fps; menu transition crashes on invalid SPIR-V (see section 4) |
-| M1 | Video, audio, saves | A | not reached |
-| M2 | World loads | A | not reached |
-| M3 | Full parity | A | not reached |
+| M0 | Prefix boots the title to the start screen | A | done: menus at 30 fps, invalid-SPIR-V crash fixed |
+| M1 | Video, audio, saves | A | intro/loading art render; no save is written before control |
+| M2 | World loads | A | world reached (player exists, pool state), 3D scene black, prestream never finishes; title asserts at #698 after ~9 min |
+| M3 | Full parity | A | parity with Windows today: same intro, same black scene, same #698 assert |
 | M4 | Native offline tools | B/1 | not started |
 | M5 | Native menus | B/2 | not started |
 
-Estimates: M0 blocked on the vkd3d-shader/Mesa issue, days to weeks of
-upstream work; M1-M2 weeks (coupled to upstream's own world progress), M4
-weeks, M5 months and high risk.
+**Conclusion.** Linux is at parity with the Windows build: menus, loading and
+the first mission's title card work; the world reaches the title's own
+prestream and then stops where Windows stops too (#698, `+0x5149aec`,
+`INSTANCE_LIST` full). Player control, movement, a 10-minute session and
+save/load cannot be demonstrated until the upstream world-rendering gaps
+(#979, #798, and #698's pool assert) are closed; no Linux-specific blocker is
+left in this checkout. Reported on #698 with the matching numbers.
+
+Estimates: M2 is gated on upstream shader coverage and #698. M4 weeks, M5
+months and high risk.
 
 ## 9. Risks
 
