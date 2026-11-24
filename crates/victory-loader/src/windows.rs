@@ -89,6 +89,11 @@ pub fn load(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
         let applied = unsafe { crate::hooks::disarm_watchdog(loaded.base(), &prepared.original_hash) };
         tracing::info!(applied, "title watchdog hooks ({})", crate::hooks::NO_WATCHDOG_ENV);
     }
+    if std::env::var_os(crate::hooks::POOL_FULL_ENV).is_some() {
+        // SAFETY: just mapped, and no title code has run.
+        let applied = unsafe { crate::hooks::ignore_pool_full(loaded.base(), &prepared.original_hash) };
+        tracing::info!(applied, "pool-full hook ({})", crate::hooks::POOL_FULL_ENV);
+    }
     tracing::info!(
         base = format_args!("{:#x}", loaded.base()),
         preferred = format_args!("{:#x}", loaded.info.image_base),
