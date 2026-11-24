@@ -170,6 +170,27 @@ not carry the intro into gameplay.
 there is nothing to load. A save made on another machine (or after the
 cutscene fix) is needed to test saving and loading here.
 
+### Which pool stops the title
+
+Issue #698's analysis (SantannaCarlos, 2026-11-24) reads `+0x5149aec` as an
+allocator at `+0x5149980` that serves only the Building and Object pools and
+breaks when that pool's free list is empty or its base is null; the
+`INSTANCE_LIST` (CEntityBatch) has its own allocator. Our two stops fit:
+
+| stop | when / frame | BUILDING | OBJECT | INSTANCE_LIST |
+|------|--------------|----------|--------|---------------|
+| `+0x5149aec` | 8m50s / 1462 | **22487/22500** | 19450/27500 | 45000/45000 |
+| `+0x63966f` | 8m41s / 1589 | 19061/22500 | 14815/27500 | 44575/45000 |
+
+At the first, the Building pool is out (13 entries left) while Object has
+room; the second is a different path with Building not full.
+
+`VICTORY_WATCH` now also takes `*<rva>+<offset>`: it reads the u64 pointer at
+`title+rva` and logs the u32 at `pointer+offset`, so the pools can be followed
+live (pointer addresses in the issue above; capacity at `+0xc`, count at
+`+0x10`). An 11-minute run that did not reach the stop ended at Building
+11625/22500, Object 9930/27500, EntityBatch 35015/45000, all still rising.
+
 Expected trouble that has not appeared yet: device creation and feature level,
 swapchain/presentation (solved by DXVK), 64-lane waves, 64-bit atomics,
 console texture tilings. Observed but not fatal: descriptor heaps larger than
