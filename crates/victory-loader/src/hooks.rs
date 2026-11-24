@@ -61,6 +61,61 @@ const POOL_FULL: &[Patch] = &[Patch {
     new: &[0x90],
 }];
 
+/// Pool traps the title installs at runtime: the load-time image holds a
+/// pointer table there, and unpacking later writes `ret; int3; xor; jmp`.
+/// The first is patched at load if it is already `0xCC`; the watcher below
+/// patches whichever appears later.
+const POOL_TRAPS: &[usize] = &[0x5149aec, 0x63966f];
+
+/// Watches `POOL_TRAPS` for the `int3` the title writes at runtime and turns
+/// it into a NOP, so an exhausted pool returns its built-in null instead of
+/// ending the process. Runs until both traps have been seen and patched.
+///
+/// # Safety
+/// `base` is the mapped image whose original BLAKE3 is `hash`.
+pub(crate) unsafe fn watch_pool_full(base: usize, hash: &blake3::Hash) {
+    if !hash.to_hex().starts_with(BUILD_1_0_2_1) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let mut patched = [false; POOL_TRAPS.len()];
+        loop {
+            let mut done = true;
+            for (i, &rva) in POOL_TRAPS.iter().enumerate() {
+                if patched[i] {
+                    continue;
+                }
+                done = false;
+                let at = (base + rva) as *mut u8;
+                // SAFETY: the offset is inside the image; the byte is read
+                // and only replaced when it is the trap.
+                if unsafe { at.read_volatile() } == 0xCC {
+                    let mut old = 0;
+                    // SAFETY: one byte of the image; the change is restored.
+                    let changed = unsafe {
+                        if VirtualProtect(at.cast(), 1, PAGE_EXECUTE_READWRITE, &mut old) == 0 {
+                            false
+                        } else {
+                            at.write_volatile(0x90);
+                            VirtualProtect(at.cast(), 1, old, &mut old);
+                            FlushInstructionCache(GetCurrentProcess(), at.cast(), 1);
+                            true
+                        }
+                    };
+                    if changed {
+                        tracing::info!(rva = format_args!("{rva:#x}"), "pool-full: trap patched at runtime");
+                        patched[i] = true;
+                    }
+                }
+            }
+            if done {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
+}
+
 /// Applies the pool-full patch if this is the build and the byte matches.
 ///
 /// # Safety
