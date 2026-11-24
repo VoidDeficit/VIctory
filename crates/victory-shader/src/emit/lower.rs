@@ -2815,6 +2815,17 @@ impl<'a> Lower<'a> {
             return self.code_smem(inst, a);
         }
         let Some(rest) = name.strip_prefix("s_buffer_load_dword") else {
+            if let Some(a) = self.scalar.get(&site).copied()
+                && self
+                    .x
+                    .native
+                    .layout
+                    .get(a.param)
+                    .is_some_and(|p| p.root == RootType::Descriptor)
+                && !self.loads_descriptor(site)
+            {
+                return self.root_view_smem(inst, a, site);
+            }
             return self.descriptor_data(inst, site);
         };
         let count = match rest {
@@ -3000,6 +3011,12 @@ impl<'a> Lower<'a> {
                 }
                 (props, None)
             }
+            Fields::Smem { .. } if un.starts_with("s_buffer_load") => {
+                if used.is_some_and(|u| u.kind == ResourceType::Cbv) {
+                    return Err("a constant buffer's descriptor read as data");
+                }
+                ((11 | u, 0), None)
+            }
             _ => return Err("a scalar memory read as data"),
         };
         let h = self.handle(site, &src, false, props)?;
@@ -3064,6 +3081,84 @@ impl<'a> Lower<'a> {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Whether a descriptor the program uses comes from the scalar load at
+    /// `site` (a descriptor in memory, not data).
+    fn loads_descriptor(&self, site: Site) -> bool {
+        self.x.res.descriptors.iter().any(|d| {
+            d.source.leaves().into_iter().any(|l| {
+                matches!(*l, Source::Loaded { load, .. } | Source::Fetched { load, .. }
+                    if load == site)
+            })
+        })
+    }
+
+    /// `s_load_dword*` from a root view's address: that buffer's memory, as
+    /// global loads from it read it (a root SRV raw, a root CBV as a
+    /// constant buffer).
+    fn root_view_smem(&mut self, inst: &Inst, a: Address, site: Site) -> Result<(), Why> {
+        let Fields::Smem {
+            data: Some(Operand::Scalar { code, .. }),
+            ..
+        } = inst.fields
+        else {
+            return Err("a scalar memory read as data");
+        };
+        let count = match inst.name().strip_prefix("s_load_dword") {
+            Some("") => 1u32,
+            Some("x2") => 2,
+            Some("x4") => 4,
+            Some("x8") => 8,
+            Some("x16") => 16,
+            _ => return Err("a scalar memory read as data"),
+        };
+        let c = self.cur;
+        let mut off = self.s.m.i32(a.offset);
+        if let Some(d) = a.dynamic {
+            let d = self.i32_of(d)?;
+            off = self.s.m.bin(c, Bin::Add, off, d);
+        }
+        let src = Source::Built {
+            address: a,
+            bits: 0,
+            words: [0, 0],
+        };
+        let raw = match self.used_kind(&src).map(|u| u.kind) {
+            Some(ResourceType::Srv) => true,
+            Some(ResourceType::Cbv) | None => false,
+            _ => return Err("a root UAV read with scalar loads"),
+        };
+        let h = if raw {
+            self.handle(site, &src, false, (11, 0))?
+        } else {
+            self.handle(site, &src, false, (13, 0x1_0000))?
+        };
+        for k in 0..count {
+            let four = self.s.m.i32(4 * k);
+            let at = self.s.m.bin(c, Bin::Add, off, four);
+            let x = if raw {
+                let (u, mask, al) = (
+                    self.s.m.undef(self.s.t.i32),
+                    self.s.m.i8(1),
+                    self.s.m.i32(4),
+                );
+                let r = self.s.op(
+                    c,
+                    "rawBufferLoad.f32",
+                    Attr::ReadOnly,
+                    self.s.t.res_ret,
+                    139,
+                    &[h, at, u, mask, al],
+                );
+                let x = self.s.m.extract(c, r, 0);
+                self.as_int(x)
+            } else {
+                self.cbuffer_dword(h, at)
+            };
+            self.write(inst, Reg::S(code + k as u8), x, None);
         }
         Ok(())
     }
@@ -7215,6 +7310,46 @@ mod tests {
             }]
         };
         lower_with(&words, layout(), used()).unwrap();
+    }
+
+    #[test]
+    fn s_buffer_load_descriptor_size_reads_as_data() {
+        // Buffer descriptor loaded from the table at s0, used by an SMEM
+        // `s_buffer_load_dword` (Fields::Smem) and also read as data via
+        // dword 2 (`s10`, num_records), then written to LDS.
+        let words = [
+            0xBE84_0300, // s_mov_b32 s4, s0
+            0xBE85_0380, // s_mov_b32 s5, 0
+            0xF408_0202,
+            0xFA00_0000, // s_load_dwordx4 s[8:11], s[4:5], null
+            0xF420_0304,
+            0xFA00_0000, // s_buffer_load_dword s12, s[8:11], null
+            0x800D_0A0C, // s_add_u32 s13, s12, s10
+            0x7E02_020D, // v_mov_b32 v1, s13
+            0xD834_0000,
+            0x0000_0100, // ds_write_b32 v0, v1
+            S_ENDPGM,
+        ];
+        let used = |kind| {
+            vec![UsedResource {
+                kind,
+                root: RootType::Table,
+                table_offset_dwords: 0,
+                lower_bound: 0,
+                stride: 0,
+                dwords: 4,
+                user_data: 0,
+                slot: 0,
+            }]
+        };
+        lower_with(&words, vec![root(RootType::Table, 0, 0)], used(ResourceType::Srv)).unwrap();
+        let err = lower_with(&words, vec![root(RootType::Table, 0, 0)], used(ResourceType::Cbv))
+            .err()
+            .expect("CBV descriptor read as data must be refused");
+        assert!(
+            err.to_string().contains("constant buffer's descriptor read as data"),
+            "unexpected error: {err}"
+        );
     }
 
     /// Tables of 2D textures at s0 and samplers at s1.
