@@ -218,9 +218,20 @@ allocations are too short).
 Measured with the hook (`applied=1`): the title no longer stops at
 `+0x5149aec`; it runs 8m45s and stops at the **second** known site,
 `+0x63966f`, with BUILDING 22485/22500 - the cutscene still wants more
-Buildings than the pool holds, so one null is not enough. The runtime bytes at
-that second address still have to be captured at crash time (the load-time
-image there is a pointer table in `.rdata`).
+Buildings than the pool holds, so one null is not enough.
+
+`VICTORY_CRASH_SAVE=0x639660:32` at that crash shows the second site is code
+by then, with the same shape:
+
+    63966e: c3        ret
+    63966f: cc        int3      <- the stop
+    639670: 31 db     xor %ebx,%ebx
+    639672: eb f0     jmp -0x10
+
+At load time that address is a pointer table, so the patch cannot be written
+up front. `VICTORY_POOL_FULL` therefore also starts a 5 ms watcher that
+replaces either known trap with a NOP the moment the title writes it (only
+build 1.0.2.1, only a byte that is `0xCC`).
 
 Expected trouble that has not appeared yet: device creation and feature level,
 swapchain/presentation (solved by DXVK), 64-lane waves, 64-bit atomics,
