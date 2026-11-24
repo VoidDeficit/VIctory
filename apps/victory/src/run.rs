@@ -189,6 +189,8 @@ fn diagnostics(image: &victory_loader::LoadedImage, cfg: &victory_core::Config) 
     victory_loader::dump_stacks_on_schedule();
     victory_hle::modules::audio::capture::start();
     watch(image.base(), image.info().size_of_image as usize);
+    dump_rva(image.base(), image.info().size_of_image as usize);
+    victory_loader::dump_stacks_on_pool(image.base(), image.info().size_of_image as usize);
     // Debugging aid: `VICTORY_CRASH_SAVE=<rva>:<len>,...` (hex) writes those
     // title ranges to `crash-<rva>.bin` in the cache dir on a crash.
     let size = image.info().size_of_image as usize;
@@ -206,6 +208,33 @@ fn diagnostics(image: &victory_loader::LoadedImage, cfg: &victory_core::Config) 
             })
             .collect(),
     );
+}
+
+/// Debugging aid: `VICTORY_DUMP_RVA=<rva-hex>:<len>` prints the mapped
+/// image's bytes. Code the title runs can differ from the file on disk
+/// (unpacking or self-patching), and a crash offset then means the mapped
+/// bytes, not the file's.
+#[cfg(all(windows, feature = "diagnostics"))]
+fn dump_rva(base: usize, size: usize) {
+    let Ok(spec) = std::env::var("VICTORY_DUMP_RVA") else {
+        return;
+    };
+    let mut parts = spec.split(':');
+    let (Some(rva), Some(len)) = (
+        parts
+            .next()
+            .and_then(|t| usize::from_str_radix(t.trim().trim_start_matches("0x"), 16).ok()),
+        parts.next().and_then(|t| t.trim().parse::<usize>().ok()),
+    ) else {
+        return;
+    };
+    if len == 0 || rva.checked_add(len).is_none_or(|end| end > size) {
+        return;
+    }
+    // SAFETY: `rva..rva+len` is inside the mapped image, checked above.
+    let bytes = unsafe { std::slice::from_raw_parts((base + rva) as *const u8, len) };
+    let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    eprintln!("VIctory: title+{rva:#x} +{len} = {}", hex.join(""));
 }
 
 /// Debugging aid: `VICTORY_WATCH=<rva>,...` (hex) logs the u32 at each
