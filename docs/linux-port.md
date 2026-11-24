@@ -234,10 +234,14 @@ replaces either known trap with a NOP the moment the title writes it (only
 build 1.0.2.1, only a byte that is `0xCC`).
 
 Result with both traps patched: **no crash for the full 13-minute run**
-(`applied=1`, `trap patched at runtime rva=0x63966f`), but presentations stop
-after about 4.5 minutes (0.1 fps, 9 s a frame, then no new frame; the process
-is still alive at the timeout). That is the world hang of #774/#638, not the
-pool. No save is written.
+(`applied=1`, `trap patched at runtime rva=0x63966f`). Frames do not stop
+outright: by 7m24s (444 s) the log still presents (`frame=2058`) at 0.1-0.5
+fps, with 9 s frames whose copies take 8.9 s for 202 MB (about 23 MB/s, far
+below the 300 MB/s the upstream notes report). Four stack dumps at 280-460 s
+show `title-main` waiting inside the title's watchdog path
+(`+0x23cf735`, after the NOPed fault), most workers idle, and no HTTP-upload
+wait; so this is throughput, not a deadlock. A Series S run tests whether the
+smaller scene gets through the prestream faster.
 
 Expected trouble that has not appeared yet: device creation and feature level,
 swapchain/presentation (solved by DXVK), 64-lane waves, 64-bit atomics,
