@@ -153,24 +153,74 @@ fn diagnostics(image: &victory_loader::LoadedImage, cfg: &victory_core::Config) 
 
 /// Debugging aid: `VICTORY_WATCH=<rva>,...` (hex) logs the u32 at each
 /// title+rva whenever it changes, polled every 5 ms (an engine's state, say).
+///
+/// `*<rva>+<offset>` reads a pointer (two u32) at `title+rva` and logs the
+/// u32 at `pointer+offset`: a pool's capacity or count inside its heap
+/// object, while the pointer itself lives in the image (see #698).
 #[cfg(all(windows, feature = "diagnostics"))]
 fn watch(base: usize, size: usize) {
     let Ok(list) = std::env::var("VICTORY_WATCH") else {
         return;
     };
-    let rvas: Vec<usize> = list
-        .split(',')
-        .filter_map(|r| usize::from_str_radix(r.trim().trim_start_matches("0x"), 16).ok())
-        .filter(|&rva| rva + 4 <= size)
-        .collect();
+    struct Probe {
+        rva: usize,
+        pointer: bool,
+        offset: usize,
+    }
+    let mut probes = Vec::new();
+    for item in list.split(',') {
+        let item = item.trim();
+        let (pointer, rest) = match item.strip_prefix('*') {
+            Some(rest) => (true, rest),
+            None => (false, item),
+        };
+        let (rva, offset) = match rest.split_once('+') {
+            Some((rva, offset)) => (
+                rva,
+                usize::from_str_radix(offset.trim().trim_start_matches("0x"), 16).unwrap_or(0),
+            ),
+            None => (rest, 0),
+        };
+        let Ok(rva) = usize::from_str_radix(rva.trim().trim_start_matches("0x"), 16) else {
+            continue;
+        };
+        // The pointer itself is eight bytes; the value after it four.
+        let span = if pointer { 8 } else { 4 + offset };
+        if rva.checked_add(span).is_some_and(|end| end <= size) {
+            probes.push(Probe {
+                rva,
+                pointer,
+                offset,
+            });
+        }
+    }
     std::thread::spawn(move || {
-        let mut seen = vec![None; rvas.len()];
+        let mut seen = vec![None; probes.len()];
         loop {
-            for (&rva, seen) in rvas.iter().zip(&mut seen) {
-                // SAFETY: four bytes inside the mapped image, checked above.
-                let value = unsafe { ((base + rva) as *const u32).read_volatile() };
+            for (probe, seen) in probes.iter().zip(&mut seen) {
+                // SAFETY: the probe's bytes are inside the mapped image; a
+                // pointer read from it is one the title uses for that pool.
+                let value = unsafe {
+                    let at = (base + probe.rva) as *const u32;
+                    if probe.pointer {
+                        let lo = u64::from(at.read_volatile());
+                        let hi = u64::from(at.add(1).read_volatile());
+                        let pool = ((hi << 32) | lo) as usize;
+                        if pool == 0 {
+                            0
+                        } else {
+                            ((pool + probe.offset) as *const u32).read_volatile()
+                        }
+                    } else {
+                        at.read_volatile()
+                    }
+                };
                 if *seen != Some(value) {
-                    eprintln!("VIctory: title+{rva:#x} = {value:#x}");
+                    let arrow = if probe.pointer { "->" } else { "" };
+                    eprintln!(
+                        "VIctory: title+{:#x}{arrow}{:#x} = {value:#x}",
+                        probe.rva, probe.offset
+                    );
                     *seen = Some(value);
                 }
             }
