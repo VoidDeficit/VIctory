@@ -40,7 +40,26 @@ if [ ! -d "${game_dir:-}" ]; then
     exit 1
 fi
 
-# The newest GE-Proton has the vkd3d-proton and DXVK builds Proton itself uses.
+# Proton Experimental has the vkd3d-proton build Proton itself uses (3.2+,
+# which structures the translated shaders this title produces); a GE-Proton
+# is the fallback, but its older vkd3d-proton crashes RADV on some shaders.
+steam_libraries() {
+    printf '%s\n' "$HOME/.local/share/Steam" "$HOME/.steam/steam"
+    local vdf
+    for vdf in "$HOME/.steam/steam/steamapps/libraryfolders.vdf" \
+        "$HOME/.local/share/Steam/steamapps/libraryfolders.vdf"; do
+        [ -f "$vdf" ] && sed -n 's/.*"path"[[:space:]]*"\(.*\)"/\1/p' "$vdf"
+    done
+}
+if [ -z "${PROTON_DIR:-}" ]; then
+    while IFS= read -r lib; do
+        candidate="$lib/steamapps/common/Proton - Experimental"
+        if [ -d "$candidate/files/lib/wine/vkd3d-proton" ]; then
+            PROTON_DIR=$candidate
+            break
+        fi
+    done < <(steam_libraries | sort -u)
+fi
 if [ -z "${PROTON_DIR:-}" ]; then
     PROTON_DIR=$(ls -d "$HOME"/.local/share/Steam/compatibilitytools.d/GE-Proton* \
         "$HOME"/.steam/root/compatibilitytools.d/GE-Proton* 2>/dev/null | sort -V | tail -1)

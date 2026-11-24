@@ -68,54 +68,51 @@ Windows ABI, TEB, SEH and PE loading. Wine already does that; vkd3d-proton
 already translates D3D12 to Vulkan. Writing both again inside VIctory is the
 work of section 7 and only worth starting if Wine blocks us.
 
-## 4. Phase 0 — Proton runtime (days) — **done, one blocker**
+## 4. Phase 0 — Proton runtime (days) — **done**
 
 Set up a dedicated prefix with vkd3d-proton and boot the (unmodified) Windows
 build. No source changes in this phase.
 
 - [x] Create prefix: `WINEPREFIX=~/.local/share/victory/prefix wineboot -i`.
 - [x] Install vkd3d-proton 64-bit: copy `d3d12.dll` and `d3d12core.dll` from
-      GE-Proton (`files/lib/wine/vkd3d-proton/x86_64-windows/`) into
+      Proton Experimental (`files/lib/wine/vkd3d-proton/x86_64-windows/`) into
       `drive_c/windows/system32/`, then force them with
-      `WINEDLLOVERRIDES="d3d12,d3d12core=n,b"`.
+      `WINEDLLOVERRIDES="d3d12,d3d12core=n,b"`. **3.2 or newer**: 3.1 turns
+      some translated shaders into SPIR-V RADV cannot take.
 - [x] Install DXVK's `dxgi.dll`, `d3d11.dll` and `d3d10core.dll` beside them
       (`files/lib/wine/dxvk/x86_64-windows/`, override `native`). Wine's own
       dxgi sends `CreateSwapChainForHwnd` into wined3d and crashes on the first
       present; DXVK's dxgi, which Proton uses, presents fine.
 - [x] Confirm the device: SM 6.6, mesh shader tier 1, 64-bit atomics on
       descriptor-heap resources, wave lanes 32-64, resource binding tier 3,
-      DXR 1.1 (vkd3d-proton 3.1.0 on RADV 26.3.1).
+      DXR 1.1 (vkd3d-proton 3.2 on RADV 26.3.1).
 - [x] Boot: the title reaches the account picker at 30 fps, presents, and
       advances on its own after about half a minute (or on Enter in a
       diagnostics build, `VICTORY_KEYS=40:Enter`).
 - [x] One command: `scripts/linux/run-victory.sh` (prefix, DLLs, game folder
       from `victory.toml`, launch).
 
-**Blocker: the menu transition kills the process (exit 3).** When the title
-creates the mesh pipeline `d4111a6e6ea49d91` + pixel `c0a7fe77b1862e10`,
-vkd3d-proton emits SPIR-V for the fragment shader that is invalid:
+### The invalid-SPIR-V crash, and its fix
 
-    block <ID> '2531' exits the loop headed by <ID> '2449',
-    but not via a structured exit
+The menu transition used to kill the process (exit 3): vkd3d-proton emitted
+SPIR-V that is invalid, and RADV segfaulted in `radv_shader_spirv_to_nir`
+instead of refusing the pipeline.
 
-RADV does not reject it and segfaults in `radv_shader_spirv_to_nir`
-(`spirv_to_nir`). Reproduced with vkd3d-proton 3.0.0 and 3.1.0 and with Mesa
-26.3.1 (CachyOS and Arch builds) and 25.3.5, so it is not a version
-regression. The same DXIL runs on Windows D3D12: either our emitter produces
-control flow vkd3d-shader mistranslates, or vkd3d-shader's structurizer is
-wrong for it. The schema, the dumped DXIL/SPIR-V and the validation output are
-in `~/.local/share/victory/diagnostics/2026-11-24-spirv/`.
+- Pixel shader: `block <ID> '2531' exits the loop headed by <ID> '2449', but
+  not via a structured exit`.
+- Compute shader, after the first fix: `Block '13273[%13273]' is already a
+  merge block for another header`.
 
-Tried and ineffective: `VKD3D_CONFIG=nodxr`, `VKD3D_DISABLE_EXTENSIONS` for
-mesh shaders / descriptor buffers / ray query (the crash moves to the next
-pipeline), the Vulkan validation layer (dies during device creation), older
-Mesa from `/tmp` ICDs. Not yet tried: AMDVLK, RADV from git, a vkd3d-shader
-fix.
+Upstream commit `45aceea` ("Shaders: one returning block per program", part of
+the `proton-fixes` branch merged here, issues #844/#994) gives every program a
+single `ret` block, as DXC does; vkd3d-proton 3.2 (Proton Experimental) then
+structures the compute programs too. The DXIL/SPIR-V dumps of the original
+failure are in `~/.local/share/victory/diagnostics/2026-11-24-spirv/` (kept as
+evidence; they are ours, not game data).
 
 `VICTORY_SKIP_PIPELINES` now also stops the host pipeline from being built
-(previously it only dropped the draws), which gets the menu past the first
-crash; the title then dies on the next new pipeline (vertex `089d6271be6650ef`,
-pixel `fa455c8a3c32577b`), so this is a diagnostic tool, not a workaround.
+(previously it only dropped the draws), which keeps a pipeline that a driver
+crashes on out of the process entirely. Diagnostics only.
 
 Expected trouble that has not appeared yet: device creation and feature level,
 swapchain/presentation (solved by DXVK), 64-lane waves, 64-bit atomics,
