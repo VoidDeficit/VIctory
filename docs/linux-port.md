@@ -233,6 +233,12 @@ up front. `VICTORY_POOL_FULL` therefore also starts a 5 ms watcher that
 replaces either known trap with a NOP the moment the title writes it (only
 build 1.0.2.1, only a byte that is `0xCC`).
 
+Result with both traps patched: **no crash for the full 13-minute run**
+(`applied=1`, `trap patched at runtime rva=0x63966f`), but presentations stop
+after about 4.5 minutes (0.1 fps, 9 s a frame, then no new frame; the process
+is still alive at the timeout). That is the world hang of #774/#638, not the
+pool. No save is written.
+
 Expected trouble that has not appeared yet: device creation and feature level,
 swapchain/presentation (solved by DXVK), 64-lane waves, 64-bit atomics,
 console texture tilings. Observed but not fatal: descriptor heaps larger than
