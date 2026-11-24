@@ -215,6 +215,13 @@ which is how the instruction was found (`VICTORY_STACKS_POOL` sampled 30
 times between 21,833 and 22,289 without catching the allocating thread:
 allocations are too short).
 
+Measured with the hook (`applied=1`): the title no longer stops at
+`+0x5149aec`; it runs 8m45s and stops at the **second** known site,
+`+0x63966f`, with BUILDING 22485/22500 - the cutscene still wants more
+Buildings than the pool holds, so one null is not enough. The runtime bytes at
+that second address still have to be captured at crash time (the load-time
+image there is a pointer table in `.rdata`).
+
 Expected trouble that has not appeared yet: device creation and feature level,
 swapchain/presentation (solved by DXVK), 64-lane waves, 64-bit atomics,
 console texture tilings. Observed but not fatal: descriptor heaps larger than
