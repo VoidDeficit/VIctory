@@ -3026,7 +3026,7 @@ impl<'a> Lower<'a> {
                 }
                 _ => return Err("a descriptor read only as data"),
             };
-            return self.descriptor_words(inst, site, &src, count, u32::from(first), code, props, image, uav);
+            return self.descriptor_words(inst, site, &src, count, first, code, props, image, uav);
         };
         let src = Source::Loaded { load: site, first };
         let used = self.used_kind(&src);
@@ -3165,7 +3165,7 @@ impl<'a> Lower<'a> {
             None => vec![(2, field(self, 0))],
         };
         for k in 0..count {
-            let rel = k.wrapping_sub(u32::from(first));
+            let rel = k.wrapping_sub(first);
             match words.iter().find(|w| w.0 == rel) {
                 Some(&(_, x)) => self.write(inst, Reg::S(code + k as u8), x, None),
                 None => {
