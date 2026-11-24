@@ -150,6 +150,12 @@ world; copies of title memory take 1.2-4.5 s per frame (100-500 MB) under
 Wine. No save file exists yet: only settings are written, because the intro
 never hands over control.
 
+A run that pressed Enter every 25 s (to try skipping the intro) and held W for
+3 s reached the same black 3D scene and then stopped presenting: six minutes
+without a new frame at 170% CPU, no crash log, killed by hand. Pausing,
+skipping and focus are therefore not what keeps the intro from finishing; it
+is the missing world content and the prestream itself.
+
 Expected trouble that has not appeared yet: device creation and feature level,
 swapchain/presentation (solved by DXVK), 64-lane waves, 64-bit atomics,
 console texture tilings. Observed but not fatal: descriptor heaps larger than
