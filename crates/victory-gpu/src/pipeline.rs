@@ -234,12 +234,17 @@ fn parse_skip_hashes(value: &str) -> Vec<String> {
 }
 
 #[cfg(all(windows, feature = "diagnostics"))]
-fn skipped_shader(p: &Pipeline) -> Option<&str> {
+fn skip_hashes() -> &'static [String] {
     static HASHES: OnceLock<Vec<String>> = OnceLock::new();
-    let hashes = HASHES.get_or_init(|| {
+    HASHES.get_or_init(|| {
         let value = std::env::var("VICTORY_SKIP_PIPELINES").unwrap_or_default();
         parse_skip_hashes(&value)
-    });
+    })
+}
+
+#[cfg(all(windows, feature = "diagnostics"))]
+fn skipped_shader(p: &Pipeline) -> Option<&str> {
+    let hashes = skip_hashes();
     if hashes.is_empty() {
         return None;
     }
@@ -247,6 +252,20 @@ fn skipped_shader(p: &Pipeline) -> Option<&str> {
         .iter()
         .find(|shader| hashes.contains(&shader.hash))
         .map(|shader| shader.hash.as_str())
+}
+
+/// The first hash in `VICTORY_SKIP_PIPELINES` one of `shaders` carries.
+#[cfg(all(windows, feature = "diagnostics"))]
+pub(crate) fn skip_hash(shaders: &[Arc<Shader>]) -> Option<&'static str> {
+    let hashes = skip_hashes();
+    shaders
+        .iter()
+        .find_map(|shader| {
+            hashes
+                .iter()
+                .find(|hash| **hash == shader.hash)
+                .map(|hash| hash.as_str())
+        })
 }
 
 #[cfg(all(windows, feature = "diagnostics"))]

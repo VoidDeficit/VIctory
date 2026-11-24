@@ -292,6 +292,13 @@ impl HostPipeline {
     /// A host pipeline for vertex and pixel shaders with the graphics
     /// state `g`, or for one compute shader.
     pub(crate) fn new(shaders: &[Arc<Shader>], g: Option<&GraphicsState>) -> Option<HostPipeline> {
+        // The pipeline a crash was traced to must not be built at all; the
+        // draws that would use it are dropped by `is_skipped`.
+        #[cfg(feature = "diagnostics")]
+        if let Some(hash) = super::skip_hash(shaders) {
+            tracing::warn!(hash, ?shaders, "host pipeline not built (VICTORY_SKIP_PIPELINES)");
+            return None;
+        }
         let find = |stage| shaders.iter().find(|s| s.stage == stage);
         let compute = match shaders {
             [cs] if cs.stage == "compute" => Some(cs),
