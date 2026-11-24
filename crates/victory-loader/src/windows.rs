@@ -92,6 +92,8 @@ pub fn load(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
     if std::env::var_os(crate::hooks::POOL_FULL_ENV).is_some() {
         // SAFETY: just mapped, and no title code has run.
         let applied = unsafe { crate::hooks::ignore_pool_full(loaded.base(), &prepared.original_hash) };
+        // SAFETY: just mapped, and no title code has run.
+        unsafe { crate::hooks::watch_pool_full(loaded.base(), &prepared.original_hash) };
         tracing::info!(applied, "pool-full hook ({})", crate::hooks::POOL_FULL_ENV);
     }
     tracing::info!(
