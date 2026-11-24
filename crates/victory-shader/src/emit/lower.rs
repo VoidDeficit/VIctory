@@ -22,6 +22,16 @@ use crate::structure::{Atom, Bool, LaneExit, Structured};
 
 type Why = &'static str;
 
+/// Element stride of a table-bound structured buffer, when the host descriptor
+/// carries `StructureByteStride`. Flat byte-offset accesses must annotate the
+/// handle as structured and split the byte address into `(index, offset)` so
+/// drivers that check offsets against the element stride do not drop elements
+/// past the first. Root descriptors have no host stride and stay raw.
+fn structured_stride(used: Option<&UsedResource>) -> Option<u32> {
+    let u = used?;
+    (u.root == RootType::Table && u.stride >= 4 && u.stride.is_multiple_of(4)).then_some(u.stride)
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Val {
     I32(V),
@@ -2934,30 +2944,53 @@ impl<'a> Lower<'a> {
         // index) that vector buffer loads read, and none write, is an SRV in
         // the title's heap, not a constant buffer: reading its slot through
         // a constant buffer handle is a descriptor of the wrong type.
+        // A structured buffer is read with its stride, so a flat byte offset
+        // is split into an element index and an offset inside it (#984).
         let buffer_view = kind.is_none() && self.buffer_loads_only(src);
         let raw = if buffer_view {
-            Some(11)
+            Some(((11, 0), None))
         } else {
-            match kind.map(|u| u.kind) {
-                Some(ResourceType::Srv) => Some(11),
-                Some(ResourceType::Uav) => Some(11 | 0x1000),
+            match kind {
+                Some(u) if matches!(u.kind, ResourceType::Srv | ResourceType::Uav) => {
+                    let uav = if u.kind == ResourceType::Uav {
+                        0x1000
+                    } else {
+                        0
+                    };
+                    let stride = structured_stride(kind);
+                    let props = match stride {
+                        Some(s) => (12 | uav, s),
+                        None => (11 | uav, 0),
+                    };
+                    Some((props, stride.map(|s| self.s.m.i32(s))))
+                }
                 _ => None,
             }
         };
-        if let Some(props) = raw {
-            let h = self.handle(site, src, false, (props, 0))?;
+        if let Some((props, stride_v)) = raw {
+            let h = self.handle(site, src, false, props)?;
+            let (iu, mask, al) = (
+                self.s.m.undef(self.s.t.i32),
+                self.s.m.i8(1),
+                self.s.m.i32(4),
+            );
             for k in 0..count {
                 let off = self.s.m.i32(4 * k);
                 let a = self.s.m.bin(c, Bin::Add, addr, off);
-                let mask = self.s.m.i8(1);
-                let (u, al) = (self.s.m.undef(self.s.t.i32), self.s.m.i32(4));
+                let (idx, eoff) = match stride_v {
+                    Some(sv) => (
+                        self.s.m.bin(c, Bin::UDiv, a, sv),
+                        self.s.m.bin(c, Bin::URem, a, sv),
+                    ),
+                    None => (a, iu),
+                };
                 let r = self.s.op(
                     c,
                     "rawBufferLoad.f32",
                     Attr::ReadOnly,
                     self.s.t.res_ret,
                     139,
-                    &[h, a, u, mask, al],
+                    &[h, idx, eoff, mask, al],
                 );
                 let x = self.s.m.extract(c, r, 0);
                 let x = self.as_int(x);
@@ -6550,7 +6583,16 @@ impl<'a> Lower<'a> {
                     let h = self.handle(site, src, false, (12 | u, stride))?;
                     (h, [index, off, iu])
                 }
-                None => (self.handle(site, src, false, (11 | u, 0))?, [off, iu, iu]),
+                None => match structured_stride(used) {
+                    Some(stride) => {
+                        let h = self.handle(site, src, false, (12 | u, stride))?;
+                        let sv = self.s.m.i32(stride);
+                        let idx = self.s.m.bin(c, Bin::UDiv, off, sv);
+                        let eoff = self.s.m.bin(c, Bin::URem, off, sv);
+                        (h, [idx, eoff, iu])
+                    }
+                    None => (self.handle(site, src, false, (11 | u, 0))?, [off, iu, iu]),
+                },
             };
             let Operand::Vector { reg, .. } = *d else {
                 return Err("buffer atomic data");
@@ -6610,6 +6652,33 @@ impl<'a> Lower<'a> {
                 }
                 vals = wide;
             }
+            if !typed
+                && index.is_none()
+                && let Some(stride) = structured_stride(used)
+            {
+                let h = self.handle(site, src, false, (12 | u, stride))?;
+                let sv = self.s.m.i32(stride);
+                let mask = self.s.m.i8(1);
+                let align = self.s.m.i32(4);
+                let at = self.begin_guarded(guard);
+                let void = self.s.t.void;
+                for (k, &v) in vals.iter().enumerate() {
+                    let four = self.s.m.i32(4 * k as u32);
+                    let a = self.s.m.bin(self.cur, Bin::Add, off, four);
+                    let idx = self.s.m.bin(self.cur, Bin::UDiv, a, sv);
+                    let eoff = self.s.m.bin(self.cur, Bin::URem, a, sv);
+                    self.s.op(
+                        self.cur,
+                        "rawBufferStore.i32",
+                        Attr::NoUnwind,
+                        void,
+                        140,
+                        &[h, idx, eoff, v, iu, iu, iu, mask, align],
+                    );
+                }
+                self.end_guarded(at, &[]);
+                return Ok(());
+            }
             let mut args = Vec::new();
             let (op, name) = if typed {
                 // shortcut: typed stores are taken to write all four channels
@@ -6661,6 +6730,35 @@ impl<'a> Lower<'a> {
                 return Err("a buffer result");
             };
             for (k, x) in self.format_load(h, off, f, count)?.into_iter().enumerate() {
+                self.write(inst, Reg::V(reg + k as u8), x, guard);
+            }
+            return Ok(());
+        }
+        if !typed
+            && index.is_none()
+            && let Some(stride) = structured_stride(used)
+        {
+            let Some(Operand::Vector { reg, .. }) = *data else {
+                return Err("a buffer result");
+            };
+            let h = self.handle(site, src, false, (12 | u, stride))?;
+            let sv = self.s.m.i32(stride);
+            let (mask, align) = (self.s.m.i8(1), self.s.m.i32(4));
+            for k in 0..count {
+                let four = self.s.m.i32(4 * k);
+                let a = self.s.m.bin(c, Bin::Add, off, four);
+                let idx = self.s.m.bin(c, Bin::UDiv, a, sv);
+                let eoff = self.s.m.bin(c, Bin::URem, a, sv);
+                let r = self.s.op(
+                    c,
+                    "rawBufferLoad.f32",
+                    Attr::ReadOnly,
+                    self.s.t.res_ret,
+                    139,
+                    &[h, idx, eoff, mask, align],
+                );
+                let x = self.s.m.extract(c, r, 0);
+                let x = self.as_int(x);
                 self.write(inst, Reg::V(reg + k as u8), x, guard);
             }
             return Ok(());
