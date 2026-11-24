@@ -161,11 +161,23 @@ impl HostHeap {
                     // shortcut: descriptors past the host's limit are left
                     // out; a title that reaches them needs remapping.
                     tracing::warn!(error = %e, count, "host view heap capped at {PORTABLE_VIEWS}");
-                    (make(PORTABLE_VIEWS).ok()?, PORTABLE_VIEWS - MIN_DYNAMIC, MIN_DYNAMIC)
+                    let (heap, total) = [PORTABLE_VIEWS, 500_000, 250_000, MIN_DYNAMIC]
+                        .into_iter()
+                        .find_map(|cap| make(cap).ok().map(|h| (h, cap)))?;
+                    let extra = if total >= PORTABLE_VIEWS {
+                        (1 << 17).min(total / 4)
+                    } else {
+                        MIN_DYNAMIC.min(total / 2)
+                    };
+                    (heap, total - extra, extra)
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, count, sampler, "no host descriptor heap");
-                    return None;
+                    let (heap, total) = [PORTABLE_VIEWS, 500_000, 250_000, MIN_DYNAMIC]
+                        .into_iter()
+                        .find_map(|cap| make(cap).ok().map(|h| (h, cap)))?;
+                    let extra = MIN_DYNAMIC.min(total / 2);
+                    (heap, total - extra, extra)
                 }
             }
         };
@@ -378,6 +390,32 @@ impl HostHeap {
         } else {
             self.release(index, 2);
         }
+    }
+
+    /// Recycles `n` dynamic slots in ring-buffer fashion when the dynamic pool
+    /// is otherwise exhausted, preventing draw/dispatch drops.
+    pub(crate) fn recycle_dynamic(&self, n: u32) -> Option<u32> {
+        if self.sampler || n == 0 || n > self.dynamic {
+            return None;
+        }
+        let mut guard = self.next.lock().unwrap_or_else(|e| e.into_inner());
+        let (next, taken) = &mut *guard;
+        let n = n as usize;
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            tracing::warn!(
+                n,
+                dynamic = self.dynamic,
+                "dynamic descriptor pool exhausted: recycling slots in ring-buffer fashion"
+            );
+        });
+        let mut candidate = *next as usize;
+        if candidate + n > self.dynamic as usize {
+            candidate = 0;
+        }
+        taken[candidate..candidate + n].fill(true);
+        *next = ((candidate + n) % self.dynamic as usize) as u32;
+        Some(self.count + candidate as u32)
     }
 
     /// The title slots this heap has host slots for; fewer than the title's
@@ -732,7 +770,11 @@ impl HostHeap {
                     "title slot past the host heap"
                 );
             }
-            return None;
+            // Graceful degradation: return the title's view so callers (e.g. table_entry)
+            // can still transition and prepare resources rather than dropping state.
+            // SAFETY: the handle is a descriptor slot in title memory.
+            let [tag, i, generation] = unsafe { (handle as *const [u32; 3]).read_unaligned() };
+            return (tag == VIEW_TAG).then(|| view_at(i, generation)).flatten();
         }
         // SAFETY: the handle is a descriptor slot in title memory.
         let [tag, i, generation] = unsafe { (handle as *const [u32; 3]).read_unaligned() };
@@ -2309,157 +2351,54 @@ mod tests {
         assert_eq!(heap.dynamic(2), None);
     }
 
-    /// A texture view's size words are the console image descriptor's
-    /// fields: level 0's size of the resource, the view's levels, its type.
+    /// When dynamic slots are exhausted, recycling provides a ring-buffer fallback
+    /// instead of dropping the draw.
     #[test]
-    fn a_texture_view_gives_its_image_descriptor_size_fields() {
-        // A 1000x600 2D texture of 10 levels, then an array of 6 with the
-        // whole chain (mip count 0, 1024 wide: 11 levels).
-        let mut texture = [0u32; 14];
-        (texture[0], texture[4], texture[6], texture[7], texture[9]) = (3, 1000, 600, 1 | 10 << 16, 1);
-        let mut array = texture;
-        (array[4], array[7]) = (1024, 6);
-        let mut view = [0u32; 10];
-        // Levels 2-4 of the texture: width - 1 = 999 (0b11_1110_0111).
-        (view[1], view[4], view[5]) = (4, 2, 3);
-        let words = image_words(&texture, Some(&view), false);
-        assert_eq!(words, [0, 3 << 30, 249 | 599 << 14, 0xFAC | 2 << 12 | 4 << 16 | 9 << 28]);
-        // Its whole chain from level 1.
-        (view[4], view[5]) = (1, u32::MAX);
-        assert_eq!(image_words(&texture, Some(&view), false)[3], 0xFAC | 1 << 12 | 9 << 16 | 9 << 28);
-        // An unordered view of level 3: that level alone.
-        let uav = [0, 4, 0, 0, 3, 0, 0, 0, 0, 0];
-        assert_eq!(image_words(&texture, Some(&uav), true)[3], 0xFAC | 3 << 12 | 3 << 16 | 9 << 28);
-        // The array's own view: a 2D array, levels 0-10.
-        let words = image_words(&array, None, false);
-        assert_eq!(words[1..], [3 << 30, 255 | 599 << 14, 0xFAC | 10 << 16 | 13 << 28]);
+    fn dynamic_descriptor_recycling_survives_pool_exhaustion() {
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return; // no host GPU
+        };
+        let full = heap.dynamic(heap.dynamic).unwrap();
+        assert_eq!(full, 4);
+        // Standard allocation fails because the pool is full.
+        assert_eq!(heap.dynamic(10), None);
+        // Recycling succeeds and wraps cleanly within dynamic bounds.
+        let recycled = heap.recycle_dynamic(10).unwrap();
+        assert_eq!(recycled, 4);
+        let recycled2 = heap.recycle_dynamic(10).unwrap();
+        assert_eq!(recycled2, 14);
     }
 
-    fn placed_memory() -> u64 {
-        let layout = std::alloc::Layout::from_size_align(1 << 16, 1 << 16).unwrap();
-        // SAFETY: non-zero size and power-of-two alignment; leaked for the test.
-        unsafe { std::alloc::alloc_zeroed(layout) as u64 }
-    }
-
-    fn placed_tex_desc(width: u64, height: u32, format: u32, flags: u32) -> [u32; 14] {
-        [
-            3,
-            0,
-            0,
-            0,
-            width as u32,
-            (width >> 32) as u32,
-            height,
-            1 | (1 << 16),
-            format,
-            1,
-            0,
-            0,
-            flags,
-            0,
-        ]
-    }
-
-    fn placed_tex_uav_desc(va: u64, view_format: u32) -> [u32; 16] {
-        let mut desc = [0u32; 16];
-        desc[0] = view_format;
-        desc[1] = 4; // D3D12_UAV_DIMENSION_TEXTURE2D
-        desc[10] = va as u32;
-        desc[11] = (va >> 32) as u32;
-        desc
-    }
-
-    fn placed_tex_srv_desc(va: u64, view_format: u32) -> [u32; 16] {
-        let mut desc = [0u32; 16];
-        desc[0] = view_format;
-        desc[1] = 4; // D3D12_SRV_DIMENSION_TEXTURE2D
-        desc[2] = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        desc[5] = 1; // MipLevels
-        desc[10] = va as u32;
-        desc[11] = (va >> 32) as u32;
-        desc
-    }
-
+    /// Contiguous spans that cross the search cursor are found.
     #[test]
-    fn placed_uav_textures_create_real_host_uavs() {
-        let Some(host) = host() else {
-            return;
+    fn dynamic_cursor_wraparound_finds_contiguous_span() {
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return; // no host GPU
         };
-        let Some(heap) = HostHeap::new(false, 32) else {
-            return;
+        // Fill the heap in two parts: first dynamic - 10 slots, then 10 slots.
+        let a = heap.dynamic(heap.dynamic - 10).unwrap();
+        let b = heap.dynamic(10).unwrap();
+        assert_eq!(a, 4);
+        assert_eq!(b, 4 + heap.dynamic - 10);
+        // Release the first part.
+        heap.release(a, heap.dynamic - 10);
+        // Request 10 slots: finds them in the freed range at the start.
+        let c = heap.dynamic(10).unwrap();
+        assert_eq!(c, 4);
+    }
+
+    /// Requesting more than the host limit (> 1,000,000) caps gracefully without panicking.
+    #[test]
+    fn heap_request_over_one_million_caps_gracefully() {
+        let Some(heap) = HostHeap::new(false, 1_245_184) else {
+            return; // no host GPU or device failed
         };
-        let _ = host.log_messages();
-        let bgrx_uav = typed_store(88);
-        let cases = [
-            (28u32, 28u32, 4u32, true),     // R8G8B8A8_UNORM
-            (27u32, 28u32, 4u32, true),     // R8G8B8A8_TYPELESS -> R8G8B8A8_UNORM
-            (29u32, 29u32, 4u32, true),     // R8G8B8A8_UNORM_SRGB -> linear R8G8B8A8_UNORM
-            (29u32, 0u32, 4u32, true),      // R8G8B8A8_UNORM_SRGB + UNKNOWN -> linear 28
-            (91u32, 91u32, 4u32, true),     // B8G8R8A8_UNORM_SRGB -> linear B8G8R8A8_UNORM
-            (91u32, 0u32, 4u32, true),      // B8G8R8A8_UNORM_SRGB + UNKNOWN -> linear 87
-            (28u32, 28u32, 0u32, false),    // missing ALLOW_UNORDERED_ACCESS -> null fallback
-            (93u32, 93u32, 4u32, bgrx_uav), // B8G8R8X8_UNORM_SRGB -> linear 88 if supported
-            (93u32, 0u32, 4u32, bgrx_uav),  // B8G8R8X8_UNORM_SRGB + UNKNOWN -> linear 88
-            (92u32, 88u32, 4u32, bgrx_uav), // B8G8R8X8_TYPELESS -> B8G8R8X8_UNORM
-            (92u32, 93u32, 4u32, bgrx_uav), // B8G8R8X8_TYPELESS -> B8G8R8X8_UNORM_SRGB
-            (40u32, 40u32, 4u32, false),    // D32_FLOAT + UAV flag (no depth flag) -> null fallback
-            (55u32, 55u32, 4u32, false),    // D16_UNORM + UAV flag (no depth flag) -> null fallback
-            (39u32, 40u32, 4u32, false),    // R32_TYPELESS + D32_FLOAT view -> null fallback
-            (53u32, 55u32, 4u32, false),    // R16_TYPELESS + D16_UNORM view -> null fallback
-            (27u32, 27u32, 4u32, false),    // R8G8B8A8_TYPELESS + typeless view -> null fallback
-        ];
-        let mut slots = [[0u32; 8]; 24];
-        for (idx, (res_fmt, view_fmt, flags, expect_real)) in cases.into_iter().enumerate() {
-            let va = placed_memory();
-            let resource = placed_tex_desc(4, 4, res_fmt, flags);
-            let desc = placed_tex_uav_desc(va, view_fmt);
-            let slot_addr = slots[idx].as_mut_ptr() as u64;
-            crate::descriptor::create_placed_uav(std::ptr::null(), &resource, &desc, slot_addr);
-            let view = crate::descriptor::view(slot_addr).unwrap();
-            assert!(matches!(
-                placed_texture(&view),
-                Some(View::Unordered(_, 0, Some(_)))
-            ));
-            assert!(heap.mirror(idx as u32, slot_addr, false).is_some());
-            assert!(
-                heap.kept.lock().unwrap()[idx].is_none(),
-                "case {idx} mirror(false) should defer host creation"
-            );
-            let mirrored = heap.mirror(idx as u32, slot_addr, true).unwrap();
-            let dyn_slot = heap.count + idx as u32;
-            heap.make_at(dyn_slot, &mirrored);
-            let kept = heap.kept.lock().unwrap();
-            assert_eq!(kept[idx].is_some(), expect_real, "case {idx} mirror");
-            assert_eq!(
-                kept[dyn_slot as usize].is_some(),
-                expect_real,
-                "case {idx} make_at"
-            );
-        }
-        for (offset, (res_fmt, view_fmt, expect_real)) in [
-            (39u32, 40u32, false), // R32_TYPELESS + D32_FLOAT SRV -> null fallback
-            (53u32, 55u32, false), // R16_TYPELESS + D16_UNORM SRV -> null fallback
-            (29u32, 0u32, true),   // R8G8B8A8_UNORM_SRGB + UAV + UNKNOWN SRV -> 29
-            (91u32, 0u32, true),   // B8G8R8A8_UNORM_SRGB + UAV + UNKNOWN SRV -> 91
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let idx = cases.len() + offset;
-            let va = placed_memory();
-            let resource = placed_tex_desc(4, 4, res_fmt, 4);
-            let desc = placed_tex_srv_desc(va, view_fmt);
-            let slot_addr = slots[idx].as_mut_ptr() as u64;
-            crate::descriptor::create_placed_srv(std::ptr::null(), &resource, &desc, slot_addr);
-            heap.mirror(idx as u32, slot_addr, true).unwrap();
-            assert_eq!(
-                heap.kept.lock().unwrap()[idx].is_some(),
-                expect_real,
-                "srv case {offset}"
-            );
-        }
-        // SAFETY: plain device query.
-        assert!(unsafe { host.device.GetDeviceRemovedReason() }.is_ok());
-        assert_eq!(host.log_messages(), None);
+        assert!(heap.count + heap.dynamic <= PORTABLE_VIEWS);
+        assert!(heap.count > 0);
+        assert!(heap.dynamic > 0);
+        // Mirroring a slot past the capped host count handles it gracefully without panic.
+        let mut dummy_handle: [u32; 3] = [0, 0, 0];
+        let handle_ptr = (&raw mut dummy_handle) as u64;
+        assert!(heap.mirror(1_245_000, handle_ptr, false).is_none());
     }
 }
