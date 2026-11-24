@@ -196,6 +196,25 @@ live (pointer addresses in the issue above; capacity at `+0xc`, count at
 `+0x10`). An 11-minute run that did not reach the stop ended at Building
 11625/22500, Object 9930/27500, EntityBatch 35015/45000, all still rising.
 
+### Own experiment: a null result instead of the trap
+
+The mapped image (which differs from the file at this byte) has, at
+`+0x5149aec`, an `int3` whose following instruction zeroes the result:
+
+    140514ae5  call  ...             ; allocate
+    140514aea  jmp   +0x...          ; success
+    140514aec  int3                  ; trap on exhaustion
+    140514aed  xor   %edi,%edi       ; null
+    140514aef  mov   %rdi,%rax       ; return
+
+`VICTORY_POOL_FULL=1` replaces the trap with a NOP (only for build 1.0.2.1
+and only if the byte is `0xCC`), so an exhausted pool returns null; the
+caller tests the result. It is opt-in and the scene then misses whatever the
+allocation was for. `VICTORY_DUMP_RVA=<rva>:<len>` prints mapped-image bytes,
+which is how the instruction was found (`VICTORY_STACKS_POOL` sampled 30
+times between 21,833 and 22,289 without catching the allocating thread:
+allocations are too short).
+
 Expected trouble that has not appeared yet: device creation and feature level,
 swapchain/presentation (solved by DXVK), 64-lane waves, 64-bit atomics,
 console texture tilings. Observed but not fatal: descriptor heaps larger than
