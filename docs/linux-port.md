@@ -160,11 +160,15 @@ With six shader PRs cherry-picked (#953, #1056, #1055, #1015 and two from
 bittertea0323's `try/wave64`: descriptor view inference) the count of shaders
 that do not translate fell from 126 to 78 and one run lasted the full 13
 minutes without the pool assert, but then stopped presenting (the lifecycle
-HLE ended it with "title did not finish suspending in time"). Upstream's
-#698 now has a measurement (VibeClauding, 2026-11-24 15:38Z) that the
-pool-full stop is a fixed point in the cutscene - same camera, clock and
-animscene across builds and frame rates - so more shader coverage alone will
-not carry the intro into gameplay.
+HLE ended it with "title did not finish suspending in time"). Three more
+PRs (#1073, #1084, #984) fixed the "select on an untracked mask" class but a
+later run still stopped at `+0x5149aec` after 9m26s with BUILDING
+22431/22500, and the remaining classes are "a descriptor read only as data",
+"a lane mask holding lanes elsewhere read as data" and "a structured buffer
+of unknown stride". Upstream's #698 has a measurement (VibeClauding,
+2026-11-24 15:38Z) that the pool-full stop is a fixed point in the cutscene -
+same camera, clock and animscene across builds and frame rates - so more
+shader coverage alone will not carry the intro into gameplay.
 
 **Save/load.** No save is written before the title hands over control, so
 there is nothing to load. A save made on another machine (or after the
@@ -180,10 +184,11 @@ breaks when that pool's free list is empty or its base is null; the
 | stop | when / frame | BUILDING | OBJECT | INSTANCE_LIST |
 |------|--------------|----------|--------|---------------|
 | `+0x5149aec` | 8m50s / 1462 | **22487/22500** | 19450/27500 | 45000/45000 |
+| `+0x5149aec` | 9m26s / 1967 | **22431/22500** | 20754/27500 | 45000/45000 |
 | `+0x63966f` | 8m41s / 1589 | 19061/22500 | 14815/27500 | 44575/45000 |
 
-At the first, the Building pool is out (13 entries left) while Object has
-room; the second is a different path with Building not full.
+At the first two the Building pool is out (13 and 69 entries left) while
+Object has room; the third is a different path with Building not full.
 
 `VICTORY_WATCH` now also takes `*<rva>+<offset>`: it reads the u64 pointer at
 `title+rva` and logs the u32 at `pointer+offset`, so the pools can be followed
