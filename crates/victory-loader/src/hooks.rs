@@ -14,6 +14,9 @@ const BUILD_1_0_2_1: &str = "b99f876b74d4a77f";
 /// Environment variable that turns the watchdog hook on.
 pub(crate) const NO_WATCHDOG_ENV: &str = "VICTORY_NO_WATCHDOG";
 
+/// Environment variable that turns the pool-full hook on.
+pub(crate) const POOL_FULL_ENV: &str = "VICTORY_POOL_FULL";
+
 /// One code patch: `rva` must hold exactly `expect` before `new` is written.
 struct Patch {
     what: &'static str,
@@ -45,6 +48,34 @@ const WATCHDOG: &[Patch] = &[
         new: &[0x66, 0x66, 0x2E, 0x0F, 0x1F, 0x84, 0, 0, 0, 0, 0],
     },
 ];
+
+/// The Building pool's allocator breaks into `int3` when its free list is
+/// empty; the instruction after the trap loads zero and returns it, so a NOP
+/// in place of the trap turns the failure into a null result the caller can
+/// handle (it tests the result). Opt-in: the scene then misses the entity
+/// rather than ending the process.
+const POOL_FULL: &[Patch] = &[Patch {
+    what: "pool full: return null instead of int3",
+    rva: 0x5149aec,
+    expect: &[0xCC],
+    new: &[0x90],
+}];
+
+/// Applies the pool-full patch if this is the build and the byte matches.
+///
+/// # Safety
+/// `base` is the mapped image whose original BLAKE3 is `hash`, and no title
+/// code is running yet.
+pub(crate) unsafe fn ignore_pool_full(base: usize, hash: &blake3::Hash) -> usize {
+    if !hash.to_hex().starts_with(BUILD_1_0_2_1) {
+        return 0;
+    }
+    POOL_FULL
+        .iter()
+        // SAFETY: forwarded from this function's contract.
+        .filter(|p| unsafe { apply(base, p) })
+        .count()
+}
 
 /// Applies the watchdog patches whose bytes match. Returns how many applied.
 ///
