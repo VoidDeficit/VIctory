@@ -40,6 +40,63 @@ pub fn dump_stacks_on_schedule() {
     });
 }
 
+/// Reads `VICTORY_STACKS_POOL=<ptr-rva>:<count-offset>:<threshold>` (hex
+/// pointer and offset, decimal threshold) and prints every thread's stack
+/// while the pool at `title+ptr-rva` is within `threshold` of its capacity.
+/// The capacity is the u32 four bytes before the count, as the title's pools
+/// lay them out (#698). Up to 40 dumps, one per second, so the dump does not
+/// take over a slow scene.
+pub fn dump_stacks_on_pool(base: usize, size: usize) {
+    let Ok(spec) = std::env::var("VICTORY_STACKS_POOL") else {
+        return;
+    };
+    let mut parts = spec.split(':');
+    let hex = |t: &str| usize::from_str_radix(t.trim().trim_start_matches("0x"), 16);
+    let (Some(rva), Some(count_off), Some(threshold)) = (
+        parts.next().and_then(|t| hex(t).ok()),
+        parts.next().and_then(|t| hex(t).ok()),
+        parts.next().and_then(|t| t.trim().parse::<u32>().ok()),
+    ) else {
+        return;
+    };
+    if count_off < 4 || rva.checked_add(8).is_none_or(|end| end > size) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let mut dumps = 0u32;
+        while dumps < 40 {
+            // SAFETY: the pointer is inside the mapped image; the pool object
+            // it names is the title's own (allocated before this thread).
+            let (capacity, in_use) = unsafe {
+                let low = u64::from(((base + rva) as *const u32).read_volatile());
+                let high = u64::from(((base + rva + 4) as *const u32).read_volatile());
+                let pool = ((high << 32) | low) as usize;
+                if pool == 0 {
+                    (0, 0)
+                } else {
+                    (
+                        ((pool + count_off - 4) as *const u32).read_volatile(),
+                        ((pool + count_off) as *const u32).read_volatile(),
+                    )
+                }
+            };
+            if capacity > 0
+                && in_use.saturating_add(threshold) >= capacity
+                && last.elapsed() >= std::time::Duration::from_secs(1)
+            {
+                eprintln!(
+                    "VIctory: pool at title+{rva:#x}: {in_use}/{capacity} (within {threshold}); stacks:"
+                );
+                dump_stacks();
+                dumps += 1;
+                last = std::time::Instant::now();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    });
+}
+
 /// `THREAD_BASIC_INFORMATION` (ntddk).
 #[repr(C)]
 struct BasicInfo {
