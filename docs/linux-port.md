@@ -156,6 +156,20 @@ without a new frame at 170% CPU, no crash log, killed by hand. Pausing,
 skipping and focus are therefore not what keeps the intro from finishing; it
 is the missing world content and the prestream itself.
 
+With six shader PRs cherry-picked (#953, #1056, #1055, #1015 and two from
+bittertea0323's `try/wave64`: descriptor view inference) the count of shaders
+that do not translate fell from 126 to 78 and one run lasted the full 13
+minutes without the pool assert, but then stopped presenting (the lifecycle
+HLE ended it with "title did not finish suspending in time"). Upstream's
+#698 now has a measurement (VibeClauding, 2026-11-24 15:38Z) that the
+pool-full stop is a fixed point in the cutscene - same camera, clock and
+animscene across builds and frame rates - so more shader coverage alone will
+not carry the intro into gameplay.
+
+**Save/load.** No save is written before the title hands over control, so
+there is nothing to load. A save made on another machine (or after the
+cutscene fix) is needed to test saving and loading here.
+
 Expected trouble that has not appeared yet: device creation and feature level,
 swapchain/presentation (solved by DXVK), 64-lane waves, 64-bit atomics,
 console texture tilings. Observed but not fatal: descriptor heaps larger than
