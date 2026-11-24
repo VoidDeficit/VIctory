@@ -94,7 +94,7 @@ pub fn dump_stacks_on_pool(base: usize, size: usize) {
             };
             if capacity > 0
                 && in_use.saturating_add(threshold) >= capacity
-                && last.elapsed() >= std::time::Duration::from_secs(1)
+                && last.elapsed() >= std::time::Duration::from_millis(250)
             {
                 eprintln!(
                     "VIctory: pool at title+{rva:#x}: {in_use}/{capacity} (within {threshold}); stacks:"
