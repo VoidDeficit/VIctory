@@ -2964,7 +2964,6 @@ impl<'a> Lower<'a> {
     // dwords (addresses, formats, tiling) have no host value: reading them
     // stops the program.
     fn descriptor_data(&mut self, inst: &Inst, site: Site) -> Result<(), Why> {
-        const OTHER: Why = "a descriptor's address or format read as data";
         let Fields::Smem {
             data: Some(Operand::Scalar { code, .. }),
             ..
@@ -2994,7 +2993,40 @@ impl<'a> Lower<'a> {
                 })
             });
         let Some((at, first)) = use_at else {
-            return Err("a descriptor read only as data");
+            // The program never samples or stores through this descriptor: it
+            // only reads words as data (dimension math). Infer the view kind
+            // from the used-resource entry the load falls in, images taken as
+            // 2D, instead of refusing the program outright.
+            let mut guess = None;
+            for k in 0..count {
+                let src = Source::Loaded { load: site, first: k as u8 };
+                if let Some(u) = self.used_kind(&src) {
+                    guess = Some((u, src, k));
+                    break;
+                }
+            }
+            let Some((used, src, first)) = guess else {
+                return Err("a descriptor read only as data");
+            };
+            if used.kind == ResourceType::Cbv {
+                return Err("a constant buffer's descriptor read as data");
+            }
+            let uav = used.kind == ResourceType::Uav;
+            let u = if uav { 0x1000 } else { 0 };
+            let (props, image) = match used.dwords {
+                8 => ((4 | u, 0x409), Some(4)),
+                4 => {
+                    let stride = used.stride;
+                    let props = if stride >= 4 && stride.is_multiple_of(4) {
+                        (12 | u, stride)
+                    } else {
+                        (11 | u, 0)
+                    };
+                    (props, None)
+                }
+                _ => return Err("a descriptor read only as data"),
+            };
+            return self.descriptor_words(inst, site, &src, count, u32::from(first), code, props, image, uav);
         };
         let src = Source::Loaded { load: site, first };
         let used = self.used_kind(&src);
@@ -3040,7 +3072,26 @@ impl<'a> Lower<'a> {
             }
             _ => return Err("a scalar memory read as data"),
         };
-        let h = self.handle(site, &src, false, props)?;
+        self.descriptor_words(inst, site, &src, count, u32::from(first), code, props, image, uav)
+    }
+
+    /// The words `descriptor_data` owes: a program's reads of its
+    /// descriptor rebuilt through `getDimensions`.
+    #[allow(clippy::too_many_arguments)]
+    fn descriptor_words(
+        &mut self,
+        inst: &Inst,
+        site: Site,
+        src: &Source,
+        count: u32,
+        first: u32,
+        code: u8,
+        props: (u32, u32),
+        image: Option<u32>,
+        uav: bool,
+    ) -> Result<(), Why> {
+        const OTHER: Why = "a descriptor's address or format read as data";
+        let h = self.handle(site, src, false, props)?;
         let c = self.cur;
         let i32t = self.s.t.i32;
         let dims = self.s.m.named_struct("dx.types.Dimensions", vec![i32t; 4]);
