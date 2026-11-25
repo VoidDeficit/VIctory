@@ -23,13 +23,21 @@ unstorable texture UAVs a81ee21, review fixes 852b207). Still open: the DEVICE_H
   the same command at frame 1341.
 - In captured frames that did not hang, the dispatch args are [0,1,1] or [1,1,1].
 
-## Leading hypothesis (unconfirmed)
-In the hang frame the indirect args hold a large group count, perhaps written wrongly
-or not yet written by the 741447 pass. The clamp in crates/victory-gpu/src/indirect.rs
-allows up to 2^20 groups per dispatch and a 2^27-thread budget per list. That is
-enough f607 work to pass the TDR.
+- **Group count ruled out**: with the indirect clamp's GROUPS set to 1 (every indirect
+  dispatch runs one group or none) it still hangs on the same command, at frame 1467.
+  No DRED page fault is reported, so it is a real hang inside a single group.
+- A plain args capture cannot show the hang frame: `read_indirect` logs only after the
+  list completes, and a hung list never completes.
+- f607's disassembly has no `s_barrier`. The two loops are wave-uniform back edges
+  (`s_cbranch_scc1` on the s20 and s6 masks). The BVH lowering (emit/lower/bvh.rs) has
+  no loops of its own.
 
-## To confirm
-One run with VICTORY_D3D12_DRED=1, VICTORY_DUMP_TARGETS=1, VICTORY_CAPTURE and
-VICTORY_CAPTURE_FRAMES covering the hang window. Then read the `indirect kind 2 … f607780…`
-trace lines. Each run takes about 14 GB of RAM.
+## Open leads
+1. Loops the per-lane counter misses. Check that both f607 back edges get a counter in
+   the translated DXIL, and that the wave-uniform exit (the scc mask built from exec)
+   still ends once lanes take the abort block.
+2. A wave-op or convergence livelock on NVIDIA, such as ballot-based exec emulation
+   inside the loop with lanes that have returned.
+3. Data written by 741447 (the voxel grid writer). Skipping it avoids the hang, so the
+   BVH or LDS stack input may be what traps a lane. Dump 741447's output buffers in the
+   frame before the hang (VICTORY_DUMP_WRITERS=741447eb077ae6d3).
