@@ -142,6 +142,8 @@ impl HostHeap {
         // every title slot; else the smaller one, and the cap after that.
         // Translated shaders clamp their indices below `heap_views` or
         // `HEAP_SAMPLERS`: slots up to there exist and stay null.
+        // Each view heap also has room past the dynamic slots for the null
+        // buffer views (the 3 slots below `views`, `null_buffer_view`).
         let (views, samplers) = (victory_shader::emit::heap_views(), victory_shader::emit::HEAP_SAMPLERS);
         let (heap, count, extra) = if sampler {
             match make(count.max(samplers)) {
@@ -151,15 +153,17 @@ impl HostHeap {
                     return None;
                 }
             }
-        } else if let Ok(heap) = make((count + DYNAMIC).max(views)) {
+        } else if let Ok(heap) = make((count + DYNAMIC + 3).max(views)) {
             (heap, count, DYNAMIC)
-        } else if let Ok(heap) = make((count + MIN_DYNAMIC).max(views)) {
+        } else if let Ok(heap) = make((count + MIN_DYNAMIC + 3).max(views)) {
             (heap, count, MIN_DYNAMIC)
         } else {
             // shortcut: title slots past the host's cap (NVIDIA) are left
-            // out; shaders clamp below `views` and read them null. A title
-            // that draws with them needs remapping. The dynamic slots, then
-            // the null buffer views, take the heap's last slots.
+            // out. The dynamic slots, then the null buffer views, take the
+            // heap's last slots: shaders clamp below `views`, so a title
+            // index past the kept ones reads a dynamic slot's view (another
+            // draw's) or a null one. A title that draws with them needs
+            // remapping.
             let title = views - MIN_DYNAMIC - 3;
             match make(views) {
                 Ok(heap) => {
@@ -1289,7 +1293,8 @@ fn buffer_srv(
 fn as_raw(first: u64, count: u32, stride: u32) -> Option<(u64, u32)> {
     (stride > 0 && stride.is_multiple_of(4)).then(|| {
         let words = u64::from(stride / 4);
-        (first * words, (u64::from(count) * words).min(u64::from(u32::MAX)) as u32)
+        // The host's most elements in a buffer view (as `raw_view_at`).
+        (first * words, (u64::from(count) * words).min(1 << 27) as u32)
     })
 }
 
@@ -1505,6 +1510,7 @@ fn typed_store(format: u32) -> bool {
         }
         .is_ok()
             && support.Support1.0 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0 != 0
+            && support.Support2.0 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE.0 != 0
     });
     known.push((format, ok));
     ok
@@ -2149,6 +2155,19 @@ mod tests {
         assert!(!within(64, 0, 0, 16));
         assert!(!within(64, 3, 2, 16));
         assert!(!within(64, u64::MAX, 1, 16));
+    }
+
+    /// Structured views become raw ones in words, at most the host's 2^27
+    /// elements; other views stay as they are.
+    #[test]
+    fn structured_views_become_raw_within_the_element_limit() {
+        assert_eq!(as_raw(3, 10, 16), Some((12, 40)));
+        assert_eq!(as_raw(0, 1 << 24, 64), Some((0, 1 << 27)));
+        assert_eq!(as_raw(0, 10, 0), None);
+        assert_eq!(as_raw(0, 10, 6), None);
+        assert_eq!(copy_align(4, 4), 16);
+        assert_eq!(copy_align(24, 24), 48);
+        assert_eq!(copy_align(4, 0), 4);
     }
 
     /// A null texture UAV keeps the title's dimension (3D for the world's

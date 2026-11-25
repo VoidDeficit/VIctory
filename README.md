@@ -29,8 +29,9 @@ In the intro cutscene at 1 fps the opening credits land over other shots than
 on a console: they follow the frame count, the shots follow the clock.
 
 NVIDIA GPUs cap shader-visible view heaps at 10^6 slots, and the world uses
-more (slot 1,236,191 and up). On such a GPU, shaders read the slots past the
-cap as empty instead of faulting the device (until 2026-11-25 the run ended
+more (slot 1,236,191 and up). On such a GPU, shaders clamp indices below the
+cap instead of faulting the device, and a slot past the kept ones reads an
+empty or unrelated view (until 2026-11-25 the run ended
 with "device removed", DXGI_ERROR_INVALID_CALL). Expect missing or wrong
 objects. The shader cache is kept per heap size, so run `translate --cache`
 again after switching GPUs.
