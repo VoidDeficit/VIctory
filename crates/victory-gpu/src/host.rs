@@ -239,6 +239,9 @@ fn create() -> windows::core::Result<Host> {
         // A host whose shader-visible view heaps stop below `HEAP_VIEWS`
         // (NVIDIA): translated shaders clamp their heap indices below its
         // cap instead, so a title slot past it reads null, not a fault.
+        // Any failure counts as "did not fit" (NVIDIA returns E_INVALIDARG
+        // or E_OUTOFMEMORY by card). This must run before the first
+        // translation or shader cache key: `heap_views` is set once.
         let views = victory_shader::emit::HEAP_VIEWS;
         if let Err(e) = device.CreateDescriptorHeap::<ID3D12DescriptorHeap>(
             &D3D12_DESCRIPTOR_HEAP_DESC {

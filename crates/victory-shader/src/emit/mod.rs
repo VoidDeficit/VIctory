@@ -274,6 +274,12 @@ static HEAP_LIMIT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 /// ([`set_heap_views`]) before the first translation. The value is part of
 /// the translation, so the shader cache must key on it (`victory-gpu`'s
 /// does).
+///
+/// Ordering: the first read locks the value. The host must probe its heaps
+/// (`victory-gpu`'s host creation) before anything translates or hashes a
+/// shader cache key; a caller that reads this first locks in
+/// [`HEAP_VIEWS`], and a capped host then faults past its heap (the probe
+/// logs an error when [`set_heap_views`] comes too late).
 pub fn heap_views() -> u32 {
     *HEAP_LIMIT.get_or_init(|| HEAP_VIEWS)
 }
