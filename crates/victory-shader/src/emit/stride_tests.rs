@@ -330,6 +330,10 @@ fn a_heap_buffer_read_where_no_buffer_view_is_reads_zeros() {
             eprintln!("no SM 6.6 {label} device; skipped");
             continue;
         };
+        if !host.takes_full_view_heap() {
+            eprintln!("{label} view heaps stop below HEAP_VIEWS; skipped");
+            continue;
+        }
         let (root, pso) = host
             .compute_pipeline(&shader)
             .unwrap_or_else(|e| panic!("{label}: compute_pipeline failed: {e}"));

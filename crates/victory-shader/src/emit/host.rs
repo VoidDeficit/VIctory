@@ -196,6 +196,23 @@ impl Host {
         Host { device, warp }
     }
 
+    /// Whether the device takes a shader-visible view heap of
+    /// [`super::HEAP_VIEWS`] slots, as [`View::NullBuffers`] needs (NVIDIA
+    /// stops at 10^6).
+    pub fn takes_full_view_heap(&self) -> bool {
+        // SAFETY: a plain heap creation on a live device.
+        unsafe {
+            self.device
+                .CreateDescriptorHeap::<ID3D12DescriptorHeap>(&D3D12_DESCRIPTOR_HEAP_DESC {
+                    Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                    NumDescriptors: super::HEAP_VIEWS,
+                    Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                    ..Default::default()
+                })
+                .is_ok()
+        }
+    }
+
     /// The root signature translated shaders expect: user data per stage
     /// at `b0`, immediate samplers per stage at `s<n>`, heaps directly
     /// indexed.
