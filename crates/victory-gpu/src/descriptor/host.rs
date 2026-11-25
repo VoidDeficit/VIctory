@@ -1438,24 +1438,15 @@ fn fits(texture: &ID3D12Resource, castable: &[u32], mut format: Option<&mut DXGI
         return false;
     }
     if view == 0 {
-        return !typeless && (!unordered || typed_store(own));
-    }
-    if DEPTH_FORMATS.iter().any(|&(typed, _)| typed == view) || is_typeless(view) {
-        once!(unordered, view, own, "view the host does not allow");
-        return false;
+        return !typeless && (!unordered || stores(own, own));
     }
     let cast = castable.contains(&view);
     if family(view) != family(own) && !cast {
         once!(view, own, "view format of another family");
         return false;
     }
-    let effective = if typeless || cast { view } else { own };
-    if unordered && !typed_store(effective) {
-        once!(
-            view = effective,
-            own,
-            "an unordered view in a format the host cannot store"
-        );
+    // The format the view gets (below): the title's, or the texture's own.
+    if unordered && !stores(if typeless || cast { view } else { own }, own) {
         return false;
     }
     if let Some(format) = format
@@ -1479,6 +1470,17 @@ fn default_view(resource: crate::object::This) -> bool {
         once!(format = other, "a view without a description of a texture whose host texture has another format");
     }
     other.is_none()
+}
+
+/// Whether the host makes typed unordered views of `format` on a texture of
+/// `own`: an optional feature for some formats (16-bit packed ones such as
+/// B5G5R5A1 on NVIDIA), whose view without it removes the device.
+fn stores(format: u32, own: u32) -> bool {
+    let ok = typed_store(format);
+    if !ok {
+        once!(format, own, "an unordered view in a format the host cannot store");
+    }
+    ok
 }
 
 /// Whether the host stores to typed unordered views of `format`.
