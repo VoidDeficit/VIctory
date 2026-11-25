@@ -250,7 +250,9 @@ fn create() -> windows::core::Result<Host> {
         ) {
             let cap = crate::descriptor::host::PORTABLE_VIEWS;
             tracing::warn!(error = %e, views, cap, "host view heaps capped: shaders read slots past the cap as null");
-            victory_shader::emit::set_heap_views(cap);
+            if !victory_shader::emit::set_heap_views(cap) {
+                tracing::error!(cap, "view-heap cap set after shaders read it");
+            }
         }
         // The console fuses its multiply-adds (`v_fma_f32`, `v_fmac_f32`,
         // `v_fma_mix*`); the lowering's DXIL `FMad` is fused only where the

@@ -30,6 +30,8 @@ static MISSES: AtomicU64 = AtomicU64::new(0);
 /// Keeps translated shaders in a folder of `dir` from now on: the folder
 /// of this translator, `None` if it cannot be opened.
 pub fn use_shader_cache(dir: PathBuf) -> Option<PathBuf> {
+    // The folder's key holds the host's heap cap, set as the host is made.
+    crate::host::host();
     let dir = dir.join(&blake3::Hash::from(*build()).to_hex()[..16]);
     match Cache::open(&dir) {
         Ok(cache) => {

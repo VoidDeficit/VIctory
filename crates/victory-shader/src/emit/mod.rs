@@ -280,9 +280,12 @@ pub fn heap_views() -> u32 {
 
 /// Sets [`heap_views`] for a host whose shader-visible view heaps stop
 /// below [`HEAP_VIEWS`] (NVIDIA: 10^6), so an index past them reads a null
-/// slot instead of faulting the device. Has no effect once read or set.
-pub fn set_heap_views(views: u32) {
-    let _ = HEAP_LIMIT.set(views.min(HEAP_VIEWS));
+/// slot instead of faulting the device. Has no effect once read or set:
+/// whether [`heap_views`] is now `views` (capped at [`HEAP_VIEWS`]).
+pub fn set_heap_views(views: u32) -> bool {
+    let views = views.min(HEAP_VIEWS);
+    let _ = HEAP_LIMIT.set(views);
+    heap_views() == views
 }
 
 /// The heap index of the host's null raw buffer SRV (the null raw UAV at
