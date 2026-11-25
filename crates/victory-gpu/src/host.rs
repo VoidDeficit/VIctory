@@ -236,6 +236,22 @@ fn create() -> windows::core::Result<Host> {
         let cpu_view_size =
             device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         tracing::info!("host D3D12 device ready");
+        // A host whose shader-visible view heaps stop below `HEAP_VIEWS`
+        // (NVIDIA): translated shaders clamp their heap indices below its
+        // cap instead, so a title slot past it reads null, not a fault.
+        let views = victory_shader::emit::HEAP_VIEWS;
+        if let Err(e) = device.CreateDescriptorHeap::<ID3D12DescriptorHeap>(
+            &D3D12_DESCRIPTOR_HEAP_DESC {
+                Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                NumDescriptors: views,
+                Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                NodeMask: 0,
+            },
+        ) {
+            let cap = crate::descriptor::host::PORTABLE_VIEWS;
+            tracing::warn!(error = %e, views, cap, "host view heaps capped: shaders read slots past the cap as null");
+            victory_shader::emit::set_heap_views(cap);
+        }
         // The console fuses its multiply-adds (`v_fma_f32`, `v_fmac_f32`,
         // `v_fma_mix*`); the lowering's DXIL `FMad` is fused only where the
         // host chooses (the RX 6700 XT does, WARP does not).

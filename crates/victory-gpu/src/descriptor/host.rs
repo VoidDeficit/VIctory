@@ -85,8 +85,9 @@ pub(crate) fn near_heaps(va: u64) -> String {
 }
 
 /// The host's limit for shader-visible view heaps on resource binding
-/// tiers 1 and 2; tier 3 hardware may take more.
-const PORTABLE_VIEWS: u32 = 1_000_000;
+/// tiers 1 and 2; tier 3 hardware may take more. Translated shaders clamp
+/// to it where the host takes no heap of `HEAP_VIEWS` (`host::create`).
+pub(crate) const PORTABLE_VIEWS: u32 = 1_000_000;
 
 /// Slots past the title's in a view heap, for tables a draw needs made
 /// afresh (constant buffers copied per draw). A list holds the slots it
@@ -139,9 +140,9 @@ impl HostHeap {
             .flatten();
         // The larger dynamic range only where the host takes it on top of
         // every title slot; else the smaller one, and the cap after that.
-        // Translated shaders clamp their indices below `HEAP_VIEWS` or
+        // Translated shaders clamp their indices below `heap_views` or
         // `HEAP_SAMPLERS`: slots up to there exist and stay null.
-        let (views, samplers) = (victory_shader::emit::HEAP_VIEWS, victory_shader::emit::HEAP_SAMPLERS);
+        let (views, samplers) = (victory_shader::emit::heap_views(), victory_shader::emit::HEAP_SAMPLERS);
         let (heap, count, extra) = if sampler {
             match make(count.max(samplers)) {
                 Ok(heap) => (heap, count, 0),
@@ -152,18 +153,18 @@ impl HostHeap {
             }
         } else if let Ok(heap) = make((count + DYNAMIC).max(views)) {
             (heap, count, DYNAMIC)
+        } else if let Ok(heap) = make((count + MIN_DYNAMIC).max(views)) {
+            (heap, count, MIN_DYNAMIC)
         } else {
-            // shortcut: a host that caps its heaps below `HEAP_VIEWS` (NVIDIA)
-            // faults on an index past them, as before the clamp.
-            match make(count + MIN_DYNAMIC) {
-                Ok(heap) => (heap, count, MIN_DYNAMIC),
-                Err(e) if count + MIN_DYNAMIC > PORTABLE_VIEWS => {
-                    // D3D12 Tier 1 hardware limit: NVIDIA (Ampere, Ada, Blackwell)
-                    // caps CBV_SRV_UAV heaps at 1,000,000 descriptors. Cap gracefully
-                    // at PORTABLE_VIEWS rather than failing adapter initialization.
-                    tracing::warn!(error = %e, count, "host view heap capped at {PORTABLE_VIEWS}");
-                    let heap = make(PORTABLE_VIEWS).ok()?;
-                    (heap, PORTABLE_VIEWS - MIN_DYNAMIC, MIN_DYNAMIC)
+            // shortcut: title slots past the host's cap (NVIDIA) are left
+            // out; shaders clamp below `views` and read them null. A title
+            // that draws with them needs remapping. The dynamic slots, then
+            // the null buffer views, take the heap's last slots.
+            let title = views - MIN_DYNAMIC - 3;
+            match make(views) {
+                Ok(heap) => {
+                    tracing::warn!(count, kept = title, "host view heap capped at {views}");
+                    (heap, count.min(title), MIN_DYNAMIC)
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, count, sampler, "no host descriptor heap");
@@ -200,7 +201,7 @@ impl HostHeap {
             kept: Mutex::new(vec![None; (count + extra) as usize]),
             next: Mutex::new((0, vec![false; extra as usize])),
             pairs: Mutex::new((count + extra, Vec::new())),
-            pairs_end: match victory_shader::emit::NULL_BUFFER_VIEW {
+            pairs_end: match victory_shader::emit::null_buffer_view() {
                 null if !sampler && null > count + extra && null < total => null - 1,
                 _ => total,
             },
@@ -224,7 +225,7 @@ impl HostHeap {
         // What shaders read instead of a slot without a buffer view where
         // they take one at a computed index (`victory_shader::emit`, "Buffer
         // views at computed heap indices"): a null raw SRV, and UAV below it.
-        let null = victory_shader::emit::NULL_BUFFER_VIEW;
+        let null = victory_shader::emit::null_buffer_view();
         if !sampler && null > count + extra && null < total {
             h.raw_view_at(null, None, 0, 0, false);
             h.raw_view_at(null - 1, None, 0, 0, true);
@@ -2226,10 +2227,10 @@ mod tests {
             return; // no host GPU
         };
         // Every index a translated shader can reach exists (clamped below
-        // `HEAP_VIEWS`, `HEAP_SAMPLERS`).
+        // `heap_views`, `HEAP_SAMPLERS`).
         // SAFETY: plain queries of live heaps.
         unsafe {
-            assert!(heap.heap.GetDesc().NumDescriptors >= victory_shader::emit::HEAP_VIEWS);
+            assert!(heap.heap.GetDesc().NumDescriptors >= victory_shader::emit::heap_views());
             let samplers = HostHeap::new(true, 128).unwrap();
             assert!(samplers.heap.GetDesc().NumDescriptors >= victory_shader::emit::HEAP_SAMPLERS);
         }
