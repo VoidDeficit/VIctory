@@ -5561,6 +5561,7 @@ impl<'a> Lower<'a> {
     /// buffer one (a wild address: the texture's address shifted 8 bits
     /// down) and faulted the device.
     fn buffer_guard(&mut self, src: &Source, index: V, sampler: bool, props: (u32, u32)) -> V {
+        let index = self.title_guard(src, index, sampler);
         // Typed, raw and structured buffers (DXIL resource kinds 10-12).
         if sampler || !(10..=12).contains(&(props.0 & 0xFF)) || !self.is_heap_direct(src) {
             return index;
@@ -5584,17 +5585,46 @@ impl<'a> Lower<'a> {
         self.s.m.select(c, none, null, index)
     }
 
-    /// Whether a descriptor comes from the resource heap itself (root type
-    /// 5, not a table) on some path.
-    fn is_heap_direct(&self, src: &Source) -> bool {
-        src.leaves().iter().any(|l| match l {
+    /// `index`, or the heap's last slot (null) where a capped host heap
+    /// keeps no title slot there (module notes, "Heap indices"): for a
+    /// view taken from the resource heap itself on every path, an index at
+    /// or past [`super::title_views`] would read a dynamic slot, another
+    /// draw's view, perhaps of another kind (a GPU hang on NVIDIA, with no
+    /// page fault). Tables hold dynamic slots' indices and are left alone.
+    fn title_guard(&mut self, src: &Source, index: V, sampler: bool) -> V {
+        let title = super::title_views();
+        if sampler || title == super::heap_views() || !self.all_heap_direct(src) {
+            return index;
+        }
+        let c = self.cur;
+        let first = self.s.m.i32(title);
+        let past = self.s.m.cmp(c, pred::IUGE, index, first);
+        let null = self.s.m.i32(super::heap_views() - 1);
+        self.s.m.select(c, past, null, index)
+    }
+
+    /// Whether a descriptor comes from the resource heap itself on every
+    /// path.
+    fn all_heap_direct(&self, src: &Source) -> bool {
+        let leaves = src.leaves();
+        !leaves.is_empty() && leaves.iter().all(|l| self.leaf_heap_direct(l))
+    }
+
+    fn leaf_heap_direct(&self, l: &Source) -> bool {
+        match l {
             Source::Loaded { load, .. } | Source::Fetched { load, .. } => self
                 .scalar
                 .get(load)
                 .and_then(|a| self.x.native.layout.get(a.param))
                 .is_some_and(|p| p.root == RootType::ResourceHeap),
             _ => false,
-        })
+        }
+    }
+
+    /// Whether a descriptor comes from the resource heap itself (root type
+    /// 5, not a table) on some path.
+    fn is_heap_direct(&self, src: &Source) -> bool {
+        src.leaves().iter().any(|l| self.leaf_heap_direct(l))
     }
 
     /// The address of the descriptor load at `load` when root parameters

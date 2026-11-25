@@ -1,43 +1,64 @@
 # GPU hang in the world (DEVICE_HUNG), Series X and Series S
 
-Status: **open**, cause unconfirmed. Last updated 2026-11-25 (GTX 1660 Super).
+Status: **fixed** (GTX 1660 Super). Last updated 2026-11-25.
 
 Branch fix/nvidia-heap-clamp (PR #2185). Fixed and committed there: the NVIDIA
 INVALID_CALL removals (heap clamp 4d91d9d/8d5eaaa, raw structured views 16580cd,
-unstorable texture UAVs a81ee21, review fixes 852b207). Still open: the DEVICE_HUNG below.
+unstorable texture UAVs a81ee21, review fixes 852b207), and this DEVICE_HUNG.
+
+## Cause and fix
+The 1660 caps the view heap at 10^6 (`host view heap capped at 1000000 count=1245184
+kept=934461`). The per-slot view-addresses table (`HostHeap::view_addresses`,
+crates/victory-gpu/src/descriptor/host.rs) was sized for `count` = 934461 slots.
+Translated shaders read it through a root SRV, which has no bounds checks, at a heap
+index clamped only below `heap_views` (10^6). That index can reach 999999, so a read
+can land up to ~524 KB past the buffer. On NVIDIA that hung f607 with no DRED page fault.
+
+The strides and marks tables were already sized `count.max(HEAP_VIEWS)`. All three now
+use `indexed_slots(count)`. Test: `per_slot_tables_cover_every_index_a_shader_reads`.
+
+Verified with the diag build plus DRED:
+- Series X: no removal through frame 1699 (the end of the run). Every unfixed run hung
+  between frames 1340 and 1603.
+- Series S: no removal through frame 1929.
 
 ## Series S
 - The old exit-139 segfault does not reproduce (`run --console series-s`).
-- It now stops at frame ~1515 with the same DEVICE_HUNG as Series X. It is the same bug,
-  not a Series S-only one.
+- Before the fix it stopped at frame ~1515 with the same DEVICE_HUNG as Series X.
+  It is the same bug, not a Series S-only one.
+- After the fix: no removal through frame 1929 (the 480 s run ended by timeout).
 
-## The hang
-- 0x887A0006 between frames ~1340 and ~1530.
+## The hang (before the fix)
+- 0x887A0006 between frames ~1340 and ~1603.
 - DRED: the hung command is `indirect kind 2 max 1 [compute f607780aa8e502d0]`
   (args at title 0xd9358fe80).
 - Skipping only f607780aa8e502d0: no removal through frame 1699.
   Skipping 741447eb077ae6d3 (the voxel grid writer) also avoids it.
 - f607 is a BVH traversal (emulated image_bvh64_intersect_ray, LDS short stack, two
   loops each capped at 0xffff by the shader).
-- **Loop count ruled out**: with VICTORY_SHADER_LOOP_LIMIT=16 plus DRED it still hangs on
-  the same command at frame 1341.
-- In captured frames that did not hang, the dispatch args are [0,1,1] or [1,1,1].
 
-- **Group count ruled out**: with the indirect clamp's GROUPS set to 1 (every indirect
-  dispatch runs one group or none) it still hangs on the same command, at frame 1467.
-  No DRED page fault is reported, so it is a real hang inside a single group.
-- A plain args capture cannot show the hang frame: `read_indirect` logs only after the
-  list completes, and a hung list never completes.
-- f607's disassembly has no `s_barrier`. The two loops are wave-uniform back edges
-  (`s_cbranch_scc1` on the s20 and s6 masks). The BVH lowering (emit/lower/bvh.rs) has
-  no loops of its own.
+## Leads ruled out
+1. **Loop count.** With VICTORY_SHADER_LOOP_LIMIT=16 it still hung on the same command
+   at frame 1341.
+2. **Group count.** With every indirect dispatch clamped to one group it still hung at
+   frame 1467. No DRED page fault was reported.
+3. **Uncounted loops.** f607's only back edges both carry the per-lane counter. There is
+   no `s_barrier`.
+4. **Wave-op or atomic spin.** waveReadLaneFirst appears only outside the loops. LDS uses
+   only store and atomicrmw xchg.
+5. **Dirty-bitmap atomics.** Skipping the memory-dirty OR still hung (frame 1455).
+6. **LDS out of range.** The groupshared array is 512 dwords and every address is masked
+   with `and 2044`.
+7. **BVH node data.** Zeroing every node dword still hung on the same command (frame 1463).
+8. **Title indices reaching dynamic slots.** `title_guard` (emit/lower.rs) sends a title
+   index at or past `title_views()` to the null last slot. It still hung at frame 1603,
+   so this was not the cause. It is kept as a correctness fix: such an index read
+   another draw's view, perhaps of another kind.
 
-## Open leads
-1. Loops the per-lane counter misses. Check that both f607 back edges get a counter in
-   the translated DXIL, and that the wave-uniform exit (the scc mask built from exec)
-   still ends once lanes take the abort block.
-2. A wave-op or convergence livelock on NVIDIA, such as ballot-based exec emulation
-   inside the loop with lanes that have returned.
-3. Data written by 741447 (the voxel grid writer). Skipping it avoids the hang, so the
-   BVH or LDS stack input may be what traps a lane. Dump 741447's output buffers in the
-   frame before the hang (VICTORY_DUMP_WRITERS=741447eb077ae6d3).
+## Open, not addressed
+- `heap_handle` clamps an index to the last slot, which holds a Texture2D null SRV.
+  A buffer or UAV handle clamped there is a type mismatch. No hang has been seen from it.
+- Review follow-up: on a capped host the heap is now exactly `heap_views()` slots unless
+  the title plus its dynamic and null slots fit under it. A larger heap would put title
+  views at the null slots shaders clamp to. The uncapped fallback keeps
+  `views - MIN_DYNAMIC - 3` title slots again.

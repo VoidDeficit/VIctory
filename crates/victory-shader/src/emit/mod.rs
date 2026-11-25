@@ -288,6 +288,22 @@ pub fn set_heap_views(views: u32) -> bool {
     heap_views() == views
 }
 
+/// The dynamic slots of a host view heap capped below [`HEAP_VIEWS`]: they
+/// and the three null slots ([`null_buffer_view`]) follow the title's.
+pub const CAPPED_DYNAMIC: u32 = 1 << 16;
+
+/// The title view slots a host heap keeps: [`heap_views`], or where the
+/// host capped it below [`HEAP_VIEWS`], those before the
+/// [`CAPPED_DYNAMIC`] dynamic slots and the null ones. Translated shaders
+/// read a title index past them from the null last slot.
+pub fn title_views() -> u32 {
+    capped_title(heap_views())
+}
+
+fn capped_title(views: u32) -> u32 {
+    if views < HEAP_VIEWS { views - CAPPED_DYNAMIC - 3 } else { views }
+}
+
 /// The heap index of the host's null raw buffer SRV (the null raw UAV at
 /// the index below): [`heap_views`] - 2. [`NULL_BUFFER_VIEW`] by default.
 pub fn null_buffer_view() -> u32 {
@@ -666,6 +682,16 @@ mod tests {
     use super::bitcode::Attr;
     use super::lower::LOOP_LIMIT;
     use super::parse_loop_limit;
+
+    /// A capped heap (NVIDIA, 10^6 views) keeps 934461 title slots: its
+    /// last 2^16 + 3 are the dynamic and null ones, which a title index
+    /// must not reach. An uncapped heap keeps every slot below it.
+    #[test]
+    fn a_capped_heap_keeps_title_slots_below_its_dynamic_ones() {
+        assert_eq!(super::capped_title(1_000_000), 934_461);
+        assert_eq!(super::capped_title(1_000_000) + super::CAPPED_DYNAMIC + 3, 1_000_000);
+        assert_eq!(super::capped_title(super::HEAP_VIEWS), super::HEAP_VIEWS);
+    }
 
     #[test]
     fn the_loop_limit_switch_parses_or_falls_back() {
