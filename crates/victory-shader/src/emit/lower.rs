@@ -4335,6 +4335,8 @@ impl<'a> Lower<'a> {
             || un.contains("atomic")
             || used.is_some_and(|u| u.kind == ResourceType::Uav);
         let u = if uav { 0x1000 } else { 0 };
+        // The bytes of a record, for a buffer counted in records.
+        let mut per = 0;
         let (props, image) = match &ui.fields {
             Fields::Image { dim, .. } => {
                 let kind = match dim {
@@ -4354,7 +4356,9 @@ impl<'a> Lower<'a> {
                 {
                     (10 | u, 0x409)
                 } else if *idxen && format.is_none() && stride >= 4 && stride.is_multiple_of(4) {
-                    (12 | u, stride)
+                    // Host buffer views are raw: bytes, counted in records below.
+                    per = stride;
+                    (11 | u, 0)
                 } else {
                     (11 | u, 0)
                 };
@@ -4373,7 +4377,10 @@ impl<'a> Lower<'a> {
                 }
                 let props = match used.stride {
                     0 | 1 => (11 | u, 0),
-                    s if s.is_multiple_of(4) => (12 | u, s),
+                    s if s.is_multiple_of(4) => {
+                        per = s;
+                        (11 | u, 0)
+                    }
                     _ => return Err("a scalar-loaded buffer of odd stride read as data"),
                 };
                 (props, None)
@@ -4429,6 +4436,11 @@ impl<'a> Lower<'a> {
                 let last = self.s.m.bin(c, Bin::Shl, levels, k16);
                 let d3 = self.s.m.bin(c, Bin::Or, base, last);
                 vec![(1, d1), (2, d2), (3, d3), (4, depth)]
+            }
+            None if per > 0 => {
+                let per = self.s.m.i32(per);
+                let bytes = field(self, 0);
+                vec![(2, self.s.m.bin(c, Bin::UDiv, bytes, per))]
             }
             None => vec![(2, field(self, 0))],
         };
@@ -9550,11 +9562,11 @@ impl<'a> Lower<'a> {
                     if stride < 4 || !stride.is_multiple_of(4) {
                         return Err("a structured buffer of unknown stride");
                     }
-                    let h = self.handle(site, src, false, (12 | u, stride))?;
+                    let h = self.handle(site, src, false, (11 | u, 0))?;
                     let s = self.s.m.i32(stride);
                     let row = self.s.m.bin(self.cur, Bin::Mul, index, s);
                     let byte = self.s.m.bin(self.cur, Bin::Add, row, off);
-                    (h, [index, off, iu], byte)
+                    (h, [byte, iu, iu], byte)
                 }
                 None => {
                     let (h, off) = self.raw_view(site, src, off, 4, (11 | u, 0), true, guard)?;
@@ -9703,11 +9715,12 @@ impl<'a> Lower<'a> {
                         if stride < 4 || !stride.is_multiple_of(4) {
                             return Err("a structured buffer of unknown stride");
                         }
-                        args.push(self.handle(site, src, false, (12 | u, stride))?);
-                        args.extend([index, off]);
+                        args.push(self.handle(site, src, false, (11 | u, 0))?);
                         let s = self.s.m.i32(stride);
                         let row = self.s.m.bin(self.cur, Bin::Mul, index, s);
-                        (byte, bytes) = (self.s.m.bin(self.cur, Bin::Add, row, off), 4 * count);
+                        byte = self.s.m.bin(self.cur, Bin::Add, row, off);
+                        args.extend([byte, iu]);
+                        bytes = 4 * count;
                     }
                     None => {
                         let n = 4 * count;
@@ -9813,14 +9826,17 @@ impl<'a> Lower<'a> {
                     if stride < 4 || !stride.is_multiple_of(4) {
                         return Err("a structured buffer of unknown stride");
                     }
-                    let h = self.handle(site, src, false, (12 | u, stride))?;
+                    let h = self.handle(site, src, false, (11 | u, 0))?;
+                    let s = self.s.m.i32(stride);
+                    let row = self.s.m.bin(c, Bin::Mul, index, s);
+                    let byte = self.s.m.bin(c, Bin::Add, row, off);
                     self.s.op(
                         c,
                         "rawBufferLoad.f32",
                         Attr::ReadOnly,
                         self.s.t.res_ret,
                         139,
-                        &[h, index, off, mask, align],
+                        &[h, byte, iu, mask, align],
                     )
                 }
                 None => {

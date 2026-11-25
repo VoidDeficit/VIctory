@@ -979,40 +979,47 @@ fn uav_desc(words: &[u32; 10]) -> D3D12_UNORDERED_ACCESS_VIEW_DESC {
 /// The byte stride of a buffer view (its element size, at least 1), 0 for
 /// other views: what the view-stride table holds for it.
 fn view_stride(view: &View) -> u32 {
+    // Nonzero: shaders taking views at computed indices read the null buffer
+    // view where the table holds 0 (`victory_shader::emit`).
+    buffer_element(view).map_or(0, |(element, _)| element.max(1) as u32)
+}
+
+/// A buffer view's element size and structure stride.
+fn buffer_element(view: &View) -> Option<(u64, u32)> {
     let (unordered, words): (bool, &[u32; 10]) = match view {
         // Read as raw buffers (`make`).
-        View::Constant(..) => return 4,
+        View::Constant(..) => return Some((4, 0)),
         View::Shader(_, Some(desc)) => (false, desc),
         View::Unordered(_, _, Some(desc)) => (true, desc),
         View::Placed(unordered, resource, desc) if resource[0] == 1 => {
             match desc[..10].try_into() {
                 Ok(words) => (*unordered, words),
-                Err(_) => return 0,
+                Err(_) => return None,
             }
         }
-        _ => return 0,
+        _ => return None,
     };
     // The view dimension: buffer (1) for shader and unordered views alike.
     if words[1] != 1 {
-        return 0;
+        return None;
     }
-    let element = if unordered {
+    Some(if unordered {
         let desc = uav_desc(words);
         // SAFETY: a buffer view's union member.
         let buffer = unsafe { desc.Anonymous.Buffer };
-        if buffer.StructureByteStride > 0 {
+        let element = if buffer.StructureByteStride > 0 {
             u64::from(buffer.StructureByteStride)
         } else if buffer.Flags.0 & D3D12_BUFFER_UAV_FLAG_RAW.0 != 0 {
             4
         } else {
             crate::resource::element(desc.Format.0 as u32).map_or(0, |(bytes, _)| bytes)
-        }
+        };
+        (element, buffer.StructureByteStride)
     } else {
-        element_size(&srv_desc(words))
-    };
-    // Nonzero: shaders taking views at computed indices read the null buffer
-    // view where the table holds 0 (`victory_shader::emit`).
-    element.max(1) as u32
+        let desc = srv_desc(words);
+        // SAFETY: a buffer view's union member.
+        (element_size(&desc), unsafe { desc.Anonymous.Buffer }.StructureByteStride)
+    })
 }
 
 /// The view-stride table's format-kind bits of a buffer view: a typed view
@@ -1192,7 +1199,8 @@ pub(crate) fn buffer_range(view: &View) -> Option<(u64, u64)> {
 /// reads, [`crate::shadow::for_view`]) and the view's title range.
 pub(crate) fn view_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)> {
     let (address, len) = buffer_range(view)?;
-    let (shadow, _) = crate::shadow::for_view(address, len, u64::from(view_stride(view)))?;
+    let (element, stride) = buffer_element(view)?;
+    let (shadow, _) = crate::shadow::for_view(address, len, copy_align(element, stride))?;
     Some((shadow, address, len))
 }
 
@@ -1238,8 +1246,9 @@ fn buffer_srv(
     }
     // The copy its own bytes are in, its first element counted from there.
     let start = address + buffer.FirstElement * element;
+    let align = copy_align(element, buffer.StructureByteStride);
     let Some((shadow, own)) =
-        crate::shadow::for_view(start, u64::from(buffer.NumElements) * element, element)
+        crate::shadow::for_view(start, u64::from(buffer.NumElements) * element, align)
     else {
         #[cfg(feature = "diagnostics")]
         if REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 200 {
@@ -1257,6 +1266,12 @@ fn buffer_srv(
         once!(first, count, element, "buffer view empty or past its host copy");
         return None;
     }
+    if let Some((first, count)) = as_raw(first, count, buffer.StructureByteStride) {
+        (buffer.FirstElement, buffer.NumElements) = (first, count);
+        buffer.StructureByteStride = 0;
+        buffer.Flags |= D3D12_BUFFER_SRV_FLAG_RAW;
+        desc.Format = DXGI_FORMAT_R32_TYPELESS;
+    }
     let host = host()?;
     // SAFETY: a live buffer and a slot of our heap.
     unsafe {
@@ -1264,6 +1279,29 @@ fn buffer_srv(
             .CreateShaderResourceView(&shadow.buffer, Some(&desc), at)
     };
     Some(Some((shadow.buffer.clone(), own.then_some(shadow))))
+}
+
+/// A structured view's range as a raw view's (4-byte words): translated
+/// shaders read every structured buffer through a raw handle at byte
+/// `index * stride + offset` (the stride may only be known at run time, from
+/// the view-stride table), and some drivers (NVIDIA) read a structured view
+/// through a raw handle wrongly.
+fn as_raw(first: u64, count: u32, stride: u32) -> Option<(u64, u32)> {
+    (stride > 0 && stride.is_multiple_of(4)).then(|| {
+        let words = u64::from(stride / 4);
+        (first * words, (u64::from(count) * words).min(u64::from(u32::MAX)) as u32)
+    })
+}
+
+/// Where in its host copy a view of `element`-byte elements must start: on
+/// an element, and a structured view (made raw, [`as_raw`]) also on 16 bytes
+/// (`D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT`).
+fn copy_align(element: u64, stride: u32) -> u64 {
+    if as_raw(0, 0, stride).is_some() {
+        element << (4 - element.trailing_zeros().min(4))
+    } else {
+        element
+    }
 }
 
 /// Whether `count` elements of `element` bytes from element `first` lie in
@@ -1303,7 +1341,8 @@ fn buffer_uav(
         return None;
     }
     let start = address + buffer.FirstElement * element;
-    let (shadow, own) = crate::shadow::for_view(start, u64::from(buffer.NumElements) * element, element)?;
+    let align = copy_align(element, buffer.StructureByteStride);
+    let (shadow, own) = crate::shadow::for_view(start, u64::from(buffer.NumElements) * element, align)?;
     // SAFETY: a live buffer.
     let flags = unsafe { shadow.buffer.GetDesc() }.Flags;
     if flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 {
@@ -1316,6 +1355,12 @@ fn buffer_uav(
     if !in_buffer(&shadow.buffer, first, count, element) {
         once!(first, count, element, "unordered buffer view empty or past its host copy");
         return None;
+    }
+    if let Some((first, count)) = as_raw(first, count, buffer.StructureByteStride) {
+        (buffer.FirstElement, buffer.NumElements) = (first, count);
+        buffer.StructureByteStride = 0;
+        buffer.Flags |= D3D12_BUFFER_UAV_FLAG_RAW;
+        desc.Format = DXGI_FORMAT_R32_TYPELESS;
     }
     let host = host()?;
     // SAFETY: a live buffer and a slot of our heap.

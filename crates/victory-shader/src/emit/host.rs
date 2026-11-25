@@ -1804,11 +1804,13 @@ impl Host {
                                 0,
                                 D3D12_BUFFER_SRV_FLAG_NONE,
                             ),
+                            // Raw, as the runtime makes a structured view
+                            // (its stride is in the view-stride table).
                             Stride::Structured(s) => (
-                                DXGI_FORMAT_UNKNOWN,
-                                data.len() * 4 / s as usize,
-                                s,
-                                D3D12_BUFFER_SRV_FLAG_NONE,
+                                DXGI_FORMAT_R32_TYPELESS,
+                                data.len() * 4 / s as usize * s as usize / 4,
+                                0,
+                                D3D12_BUFFER_SRV_FLAG_RAW,
                             ),
                             Stride::Format(f, bytes) => (
                                 f,

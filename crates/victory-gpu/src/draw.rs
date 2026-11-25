@@ -3606,7 +3606,10 @@ void main(uint3 id : SV_DispatchThreadID) {
             // SAFETY: a live buffer.
             unsafe { made.GetDesc() }.Width
         };
-        assert_eq!(width(start + 456), 1 << 16, "on an element: the buffer's copy");
+        // Host views of structured buffers are raw: on an element 16 bytes
+        // in (912), the buffer's copy; on one that is not (456), its own.
+        assert_eq!(width(start + 912), 1 << 16, "on an element: the buffer's copy");
+        assert_ne!(width(start + 456), 1 << 16, "off 16 bytes: a copy of its own bytes (in a shared buffer)");
         assert_ne!(width(start + 100), 1 << 16, "off: a copy of its own bytes (in a shared buffer)");
         let (copy, address, len) = crate::descriptor::host::view_copy(&view(start + 100)).unwrap();
         assert_eq!((copy.range(), address, len), ((start + 100, 4 * 456), start + 100, 4 * 456));
