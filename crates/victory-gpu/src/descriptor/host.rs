@@ -158,26 +158,16 @@ impl HostHeap {
             match make(count + MIN_DYNAMIC) {
                 Ok(heap) => (heap, count, MIN_DYNAMIC),
                 Err(e) if count + MIN_DYNAMIC > PORTABLE_VIEWS => {
-                    // shortcut: descriptors past the host's limit are left
-                    // out; a title that reaches them needs remapping.
+                    // D3D12 Tier 1 hardware limit: NVIDIA (Ampere, Ada, Blackwell)
+                    // caps CBV_SRV_UAV heaps at 1,000,000 descriptors. Cap gracefully
+                    // at PORTABLE_VIEWS rather than failing adapter initialization.
                     tracing::warn!(error = %e, count, "host view heap capped at {PORTABLE_VIEWS}");
-                    let (heap, total) = [PORTABLE_VIEWS, 500_000, 250_000, MIN_DYNAMIC]
-                        .into_iter()
-                        .find_map(|cap| make(cap).ok().map(|h| (h, cap)))?;
-                    let extra = if total >= PORTABLE_VIEWS {
-                        (1 << 17).min(total / 4)
-                    } else {
-                        MIN_DYNAMIC.min(total / 2)
-                    };
-                    (heap, total - extra, extra)
+                    let heap = make(PORTABLE_VIEWS).ok()?;
+                    (heap, PORTABLE_VIEWS - MIN_DYNAMIC, MIN_DYNAMIC)
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, count, sampler, "no host descriptor heap");
-                    let (heap, total) = [PORTABLE_VIEWS, 500_000, 250_000, MIN_DYNAMIC]
-                        .into_iter()
-                        .find_map(|cap| make(cap).ok().map(|h| (h, cap)))?;
-                    let extra = MIN_DYNAMIC.min(total / 2);
-                    (heap, total - extra, extra)
+                    return None;
                 }
             }
         };
@@ -2355,9 +2345,12 @@ mod tests {
         if heap.count < 1_245_184 {
             assert!(heap.count + heap.dynamic <= PORTABLE_VIEWS);
         }
-        // Mirroring a slot past the capped host count handles it gracefully without panic.
-        let mut dummy_handle: [u32; 3] = [0, 0, 0];
-        let handle_ptr = (&raw mut dummy_handle) as u64;
-        assert!(heap.mirror(1_245_000, handle_ptr, false).is_none());
+        // Mirroring a slot past the capped host count handles it gracefully without panic:
+        // with tag 0 it returns None.
+        let mut zero_handle: [u32; 3] = [0, 0, 0];
+        assert!(heap.mirror(1_245_000, (&raw mut zero_handle) as u64, false).is_none());
+        // With VIEW_TAG and an unallocated generation, it safely yields None without host heap indexing.
+        let mut view_handle: [u32; 3] = [VIEW_TAG, 0, 0];
+        assert_eq!(heap.mirror(1_245_000, (&raw mut view_handle) as u64, false), None);
     }
 }
