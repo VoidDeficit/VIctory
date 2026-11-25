@@ -17,16 +17,27 @@ can land up to ~524 KB past the buffer. On NVIDIA that hung f607 with no DRED pa
 The strides and marks tables were already sized `count.max(HEAP_VIEWS)`. All three now
 use `indexed_slots(count)`. Test: `per_slot_tables_cover_every_index_a_shader_reads`.
 
-Verified with the diag build plus DRED:
-- Series X: no removal through frame 1699 (the end of the run). Every unfixed run hung
-  between frames 1340 and 1603.
-- Series S: no removal through frame 1929.
+Verified with the diag build plus DRED. No run after the fix had a device removal.
+Every unfixed run hung between frames 1340 and 1603.
+- Series X (vaddr1): no removal. At frame 1699 the run ended in a title crash: seven
+  int3s (0x80000003 at victory-image+0x5149aec), then WER.
+- Series X (final1, the build after the review fixes): no removal. At frame 1797 it
+  ended with exit 139: an AV executing unmapped memory inside the NVIDIA driver
+  (nvwgf2umx.dll), called from victory.exe through D3D12Core. The log line before it
+  was `slow host submission ms=1684`, followed by mesh pipeline creation.
+- Series S (vaddrS): no removal through frame 1929, when the 480 s run timed out. It
+  logged one first-chance AV in nvwgf2umx.dll+0x122db1c (read 0x0); the title
+  survived it.
+
+## New crashes past the old hang point (open)
+These are separate from the hang and not yet triaged: the title int3s, and the driver
+AV. Neither run produced DRED data, and the victory.exe frames are not symbolized.
 
 ## Series S
 - The old exit-139 segfault does not reproduce (`run --console series-s`).
 - Before the fix it stopped at frame ~1515 with the same DEVICE_HUNG as Series X.
   It is the same bug, not a Series S-only one.
-- After the fix: no removal through frame 1929 (the 480 s run ended by timeout).
+- After the fix: no removal through frame 1929, when the 480 s run timed out.
 
 ## The hang (before the fix)
 - 0x887A0006 between frames ~1340 and ~1603.
