@@ -15,6 +15,15 @@ unwind registration (`crates/victory-loader/src/lib.rs`, steps 1-2), so a
 Wine-free process is a separate, much larger project (section 7), not a
 prerequisite for playing on Linux.
 
+> **State 2026-11-26.** Upstream moved to `DexNom/VIctory` and `64bd58f`
+> (338 commits). This branch carries only the Linux pieces on top of it
+> (watchdog hook, pool traps, return-block shader fix, diagnostics, launcher).
+> It builds and passes the gates, but a Linux run crashes early inside
+> vkd3d-proton (`d3d12core.dll+0x1d5ff5`, a null read while a compute pipeline
+> is built). The old-base branch `void/in-game` (main `ffe310e` + the
+> proton-fixes) is still the one that reaches the first mission, so porting
+> the proton-fixes onto the new base is the next task.
+
 ## 1. Definition of done
 
 Track A (product goal) is done when all of these hold on Linux:
