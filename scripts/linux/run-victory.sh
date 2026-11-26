@@ -73,6 +73,10 @@ export WINEPREFIX=$prefix
 export WINEDEBUG=${WINEDEBUG:--all}
 export VKD3D_DEBUG=${VKD3D_DEBUG:-none}
 export DXVK_LOG_LEVEL=${DXVK_LOG_LEVEL:-none}
+# vkd3d-proton's pipeline cache cannot create its file in the game folder when
+# that is a network or read-only mount; keep it on the host beside the prefix.
+export VKD3D_SHADER_CACHE_PATH=${VKD3D_SHADER_CACHE_PATH:-$prefix/vkd3d-cache}
+mkdir -p "$VKD3D_SHADER_CACHE_PATH" 2>/dev/null || true
 export WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11,d3d10core=n,b${WINEDLLOVERRIDES:+,$WINEDLLOVERRIDES}"
 
 if [ ! -d "$prefix/drive_c/windows/system32" ]; then
