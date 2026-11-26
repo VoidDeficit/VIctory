@@ -20,6 +20,14 @@ pub(crate) const POOL_FULL_ENV: &str = "VICTORY_POOL_FULL";
 /// Environment variable that makes the startup ready-wait answer true.
 pub(crate) const SKIP_READY_ENV: &str = "VICTORY_SKIP_READY";
 
+/// Environment variable that queries the object the startup wait polls and
+/// logs its type, name and wait state (`VICTORY_READY_OBJECT=<seconds>`).
+pub(crate) const READY_OBJECT_ENV: &str = "VICTORY_READY_OBJECT";
+
+/// Environment variable that releases the semaphore the startup wait polls
+/// (`VICTORY_RELEASE_READY=<seconds>`), as its worker would.
+pub(crate) const RELEASE_READY_ENV: &str = "VICTORY_RELEASE_READY";
+
 /// One code patch: `rva` must hold exactly `expect` before `new` is written.
 struct Patch {
     what: &'static str,
@@ -63,6 +71,102 @@ const POOL_FULL: &[Patch] = &[Patch {
     expect: &[0xCC],
     new: &[0x90],
 }];
+
+/// Releases the semaphore the startup wait polls once, `seconds` after the
+/// image is mapped. The wait calls `WaitForSingleObject(handle, 0)` on the
+/// handle in `title+0xA210CF8` (a semaphore) and sleeps 1 ms until it is
+/// signaled; releasing it is what the worker it waits for would do.
+///
+/// # Safety
+/// `base` is the mapped image; only its handle value is read.
+pub(crate) unsafe fn release_ready(base: usize, hash: &blake3::Hash, seconds: u64) {
+    if !hash.to_hex().starts_with(BUILD_1_0_2_1) {
+        return;
+    }
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Threading::ReleaseSemaphore;
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(seconds));
+        // SAFETY: the pointer is the mapped image's; the handle is the one
+        // the title polls.
+        let value = unsafe {
+            let at = (base + 0xA210CF8) as *const u32;
+            let lo = u64::from(at.read_volatile());
+            let hi = u64::from(at.add(1).read_volatile());
+            ((hi << 32) | lo) as usize
+        };
+        if value == 0 {
+            tracing::info!("release ready: no handle yet");
+            return;
+        }
+        // SAFETY: the handle is a semaphore the title polls; one release is
+        // what its worker would do.
+        let ok = unsafe { ReleaseSemaphore(value as HANDLE, 1, std::ptr::null_mut()) };
+        tracing::info!(handle = format_args!("{value:#x}"), ok = ok != 0, "release ready");
+    });
+}
+
+/// Logs what the startup wait polls: the handle in `title+0xA210CF8`, its
+/// object type and name (`NtQueryObject(ObjectTypeInformation)`) and whether
+/// `WaitForSingleObject(handle, 0)` reports it signaled. Diagnostic only.
+///
+/// # Safety
+/// `base` is the mapped image; only its handle value is read.
+pub(crate) unsafe fn log_ready_object(base: usize, hash: &blake3::Hash, seconds: u64) {
+    if !hash.to_hex().starts_with(BUILD_1_0_2_1) {
+        return;
+    }
+    use windows_sys::Wdk::Foundation::{NtQueryObject, ObjectTypeInformation};
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(seconds));
+        // SAFETY: the pointer is the mapped image's; the handle is the one
+        // the title polls.
+        let value = unsafe {
+            let at = (base + 0xA210CF8) as *const u32;
+            let lo = u64::from(at.read_volatile());
+            let hi = u64::from(at.add(1).read_volatile());
+            ((hi << 32) | lo) as usize
+        };
+        if value == 0 {
+            tracing::info!("ready object: no handle yet");
+            return;
+        }
+        let handle = value as HANDLE;
+        let mut buf = [0u8; 1024];
+        let mut ret = 0u32;
+        // SAFETY: a buffer of a valid size for the query and a live handle.
+        let status = unsafe {
+            NtQueryObject(
+                handle,
+                ObjectTypeInformation,
+                buf.as_mut_ptr().cast(),
+                buf.len() as u32,
+                &mut ret,
+            )
+        };
+        let len = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+        let ptr = u64::from_le_bytes(buf[8..16].try_into().unwrap()) as usize;
+        let name = if status == 0 && ptr != 0 && len > 0 && len <= 256 && len.is_multiple_of(2) {
+            // SAFETY: the system wrote a UTF-16 string of `len` bytes here.
+            let units = unsafe { std::slice::from_raw_parts(ptr as *const u16, len / 2) };
+            String::from_utf16_lossy(units)
+        } else {
+            "?".into()
+        };
+        // SAFETY: a plain wait with no timeout.
+        let wait = unsafe { WaitForSingleObject(handle, 0) };
+        tracing::info!(
+            handle = format_args!("{value:#x}"),
+            status,
+            returned = ret,
+            name,
+            wait,
+            "ready object"
+        );
+    });
+}
 
 /// The startup wait `title-main` spins in (`+0x23cf716` calls `+0x23cb280`
 /// and sleeps 1 ms while it is false). The thunk reads a global and tail-calls

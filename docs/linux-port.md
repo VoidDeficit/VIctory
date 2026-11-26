@@ -24,6 +24,19 @@ prerequisite for playing on Linux.
 > because the service object the wait guards is null; NOPing that assert
 > moves the fault to a null read at `+0x1377f6`. So the wait guards a service
 > the HLE does not provide yet; that object is the next thing to identify.
+> **The polled object is a semaphore.** With the map offset accounted for,
+> the pointer at `title+0x6793B20` is Wine `kernelbase+0x77150`
+> (`WaitForSingleObject`). `VICTORY_READY_OBJECT=6` reports
+> `NtQueryObject` type **"Semaphore"**, `WaitForSingleObject(handle, 0) = 258`
+> (`WAIT_TIMEOUT`). `VICTORY_RELEASE_READY=6` calls `ReleaseSemaphore`: it
+> succeeds, the front end runs at **30 fps**, and the title then jumps to a
+> wild address (`0x66f53e6d0`, execute) because the worker that would release
+> the semaphore also initialises state the menu needs. So the gate is a
+> worker-completion semaphore, and the worker itself is the thing to find.
+>
+> (The first release attempt crashed in our own code: the hook ran for title
+> DLLs too, reading `dll base + 0xA210CF8`; it is now build-hash gated.)
+>
 > The check calls a function pointer from `title+0x6793B20`; in the run it
 > resolves to **Wine `kernelbase.dll+0x76150`**, i.e. a
 > `WaitForSingleObject(handle, 0)`-shaped poll on the value in

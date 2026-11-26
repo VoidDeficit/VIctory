@@ -89,6 +89,16 @@ pub fn load(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
         let applied = unsafe { crate::hooks::disarm_watchdog(loaded.base(), &prepared.original_hash) };
         tracing::info!(applied, "title watchdog hooks ({})", crate::hooks::NO_WATCHDOG_ENV);
     }
+    if let Some(seconds) = std::env::var_os(crate::hooks::RELEASE_READY_ENV) {
+        let seconds = seconds.to_string_lossy().parse().unwrap_or(6);
+        // SAFETY: just mapped, and no title code has run.
+        unsafe { crate::hooks::release_ready(loaded.base(), &prepared.original_hash, seconds) };
+    }
+    if let Some(seconds) = std::env::var_os(crate::hooks::READY_OBJECT_ENV) {
+        let seconds = seconds.to_string_lossy().parse().unwrap_or(6);
+        // SAFETY: just mapped, and no title code has run.
+        unsafe { crate::hooks::log_ready_object(loaded.base(), &prepared.original_hash, seconds) };
+    }
     if std::env::var_os(crate::hooks::SKIP_READY_ENV).is_some() {
         // SAFETY: just mapped, and no title code has run.
         let applied = unsafe { crate::hooks::skip_ready(loaded.base(), &prepared.original_hash) };
