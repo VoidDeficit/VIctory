@@ -174,6 +174,24 @@ shader coverage alone will not carry the intro into gameplay.
 there is nothing to load. A save made on another machine (or after the
 cutscene fix) is needed to test saving and loading here.
 
+### The stall after frame 512 (2026-11-26)
+
+With vkd3d-proton's pipeline cache moved to the prefix (`VKD3D_SHADER_CACHE_PATH`,
+the launcher now does this; the game folder on `/mnt/mars` could not create
+`vkd3d-proton.cache.write`), the cache fills (600 KB), but a run stops
+presenting after frame 512. Three stack dumps at 90/150/210 s are identical:
+`title-main` waits in the title's watchdog path (`+0x23cf735`, after the NOPed
+fault), every worker is idle, CPU is 0.9% and the GPU 0% busy. Frames the log
+still reports take 14 s, of which about 3 s is accounted work (1 s preparing,
+30 ms GPU, 1.6 s heap passes): the rest is the wait. The watchdog was tripped
+by a stall longer than its 30 one-second ticks, most likely a pipeline compile
+or GPU work under Wine; the hook then keeps the process alive in the handler
+instead of ending it.
+
+This is the same class as #698/#774: the title's own progress stops and the
+process only waits. A save made after the cutscene on another machine is the
+shortest way past it.
+
 ### Which pool stops the title
 
 Issue #698's analysis (SantannaCarlos, 2026-11-24) reads `+0x5149aec` as an
