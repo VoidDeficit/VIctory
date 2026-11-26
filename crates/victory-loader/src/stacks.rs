@@ -107,7 +107,6 @@ pub fn dump_stacks_on_pool(base: usize, size: usize) {
         }
     });
 }
-}
 
 /// `THREAD_BASIC_INFORMATION` (ntddk).
 #[repr(C)]
