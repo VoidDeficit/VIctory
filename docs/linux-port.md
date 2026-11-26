@@ -36,6 +36,14 @@ prerequisite for playing on Linux.
 >
 > (The first release attempt crashed in our own code: the hook ran for title
 > DLLs too, reading `dll base + 0xA210CF8`; it is now build-hash gated.)
+> Stack dumps at 12/20/28 s with symbols from the same build show `title-main`
+> blocked at `+0x21b70a5` (an ntdll wait) in all three, while all eight
+> `victory-pipelines` threads compile shaders until about 20 s and are idle at
+> 28 s. No HLE function is on the wait's stack, and no thread sits in
+> libhttpclient; the Bink threads are the video decoder. So the ready
+> condition is title-internal and outlives the shader work: releasing the
+> semaphore bypasses state the title's worker would have built, and the title
+> jumps to a wild address.
 >
 > The check calls a function pointer from `title+0x6793B20`; in the run it
 > resolves to **Wine `kernelbase.dll+0x76150`**, i.e. a
