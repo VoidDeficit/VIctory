@@ -280,6 +280,10 @@ struct Lower<'a> {
     counters: HashMap<usize, (V, Vec<(V, usize)>)>,
     /// The block a loop stopped by [`LOOP_LIMIT`] leaves the program from.
     abort: Option<usize>,
+    /// The one block that returns: every end of the program branches to it,
+    /// so the function has a single exit as DXC emits it (dxil-spirv, under
+    /// Proton, cannot structure a loop left by both a break and a return).
+    ret: Option<usize>,
     /// The 16/64-bit round mode (MODE bits 3:2) each block starts with, and
     /// the one in force at the instruction being lowered (see [`round16`]).
     round16: Vec<Option<u8>>,
@@ -723,6 +727,7 @@ impl<'a> Lower<'a> {
             code_table: None,
             counters: HashMap::new(),
             abort: None,
+            ret: None,
             round16: round16(p),
             mode16: Some(0),
         }
@@ -10219,7 +10224,7 @@ impl<'a> Lower<'a> {
                     self.s
                         .op(self.cur, "discard", Attr::NoUnwind, self.s.t.void, 82, &[t]);
                 }
-                Term::Ret
+                Term::Br(self.ret_block())
             }
             LaneExit::Indirect => return Err(unsupported(offset, "an indirect jump")),
         };
@@ -10265,12 +10270,24 @@ impl<'a> Lower<'a> {
             self.s
                 .op(a, "discard", Attr::NoUnwind, self.s.t.void, 82, &[t]);
         }
-        self.s.m.terminate(a, Term::Ret);
+        let r = self.ret_block();
+        self.s.m.terminate(a, Term::Br(r));
         self.abort = Some(a);
         a
     }
 
     /// The DXIL block a branch from IR block `from` to `to` goes to.
+    /// The function's single returning block (see `ret`).
+    fn ret_block(&mut self) -> usize {
+        if let Some(r) = self.ret {
+            return r;
+        }
+        let r = self.s.m.new_block();
+        self.s.m.terminate(r, Term::Ret);
+        self.ret = Some(r);
+        r
+    }
+
     fn edge(&mut self, from: usize, to: usize) -> usize {
         let target = self.block[to].expect("reachable");
         let preds = self.x.p.blocks[to]
