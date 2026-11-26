@@ -17,6 +17,9 @@ pub(crate) const NO_WATCHDOG_ENV: &str = "VICTORY_NO_WATCHDOG";
 /// Environment variable that turns the pool-full hook on.
 pub(crate) const POOL_FULL_ENV: &str = "VICTORY_POOL_FULL";
 
+/// Environment variable that makes the startup ready-wait answer true.
+pub(crate) const SKIP_READY_ENV: &str = "VICTORY_SKIP_READY";
+
 /// One code patch: `rva` must hold exactly `expect` before `new` is written.
 struct Patch {
     what: &'static str,
@@ -60,6 +63,43 @@ const POOL_FULL: &[Patch] = &[Patch {
     expect: &[0xCC],
     new: &[0x90],
 }];
+
+/// The startup wait `title-main` spins in (`+0x23cf716` calls `+0x23cb280`
+/// and sleeps 1 ms while it is false). The thunk reads a global and tail-calls
+/// the check; forcing `al = 1` lets the loop proceed. Opt-in, and only if the
+/// thunk's first bytes match.
+const SKIP_READY: &[Patch] = &[
+    Patch {
+        what: "startup: the ready wait answers true",
+        rva: 0x23cb280,
+        expect: &[0x48, 0x8B, 0x0D],
+        new: &[0xB0, 0x01, 0xC3],
+    },
+    // The null-service assert that follows the skipped wait (cmp [rcx+0x20],0
+    // falls into an int3). Opt-in with the same switch, for the experiment.
+    Patch {
+        what: "startup: a null service after the wait is not fatal",
+        rva: 0x1377e7,
+        expect: &[0xCC],
+        new: &[0x90],
+    },
+];
+
+/// Applies the ready-wait patch if the build and bytes match.
+///
+/// # Safety
+/// `base` is the mapped image whose original BLAKE3 is `hash`, and no title
+/// code is running yet.
+pub(crate) unsafe fn skip_ready(base: usize, hash: &blake3::Hash) -> usize {
+    if !hash.to_hex().starts_with(BUILD_1_0_2_1) {
+        return 0;
+    }
+    SKIP_READY
+        .iter()
+        // SAFETY: forwarded from this function's contract.
+        .filter(|p| unsafe { apply(base, p) })
+        .count()
+}
 
 /// Pool traps the title installs at runtime: the load-time image holds a
 /// pointer table there, and unpacking later writes `ret; int3; xor; jmp`.

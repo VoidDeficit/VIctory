@@ -15,6 +15,16 @@ unwind registration (`crates/victory-loader/src/lib.rs`, steps 1-2), so a
 Wine-free process is a separate, much larger project (section 7), not a
 prerequisite for playing on Linux.
 
+> **Startup wait (2026-11-26).** `title-main` does not wait on the GPU or the
+> watchdog: from ~15 s it spins in `+0x23cf716`, sleeping 1 ms while
+> `+0x23cb280` (a thunk into `+0x5441be0` with a global object) answers
+> false. `VICTORY_SKIP_READY=1` patches that thunk to `al = 1`. The title then
+> runs the front end at **30 fps**, but after ~28 s it hits an inline assert
+> (`cmp [rcx+0x20], 0` at `+0x1377e0` falls into an `int3` at `+0x1377e7`)
+> because the service object the wait guards is null; NOPing that assert
+> moves the fault to a null read at `+0x1377f6`. So the wait guards a service
+> the HLE does not provide yet; that object is the next thing to identify.
+
 ## 1. Definition of done
 
 Track A (product goal) is done when all of these hold on Linux:
