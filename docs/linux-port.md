@@ -24,6 +24,14 @@ prerequisite for playing on Linux.
 > because the service object the wait guards is null; NOPing that assert
 > moves the fault to a null read at `+0x1377f6`. So the wait guards a service
 > the HLE does not provide yet; that object is the next thing to identify.
+> The check calls a function pointer from `title+0x6793B20`; in the run it
+> resolves to **Wine `kernelbase.dll+0x76150`**, i.e. a
+> `WaitForSingleObject(handle, 0)`-shaped poll on the value in
+> `title+0xA210CF8` (0x648/0x658 across runs). That value is **not** a kernel
+> event handle: `SetEvent(handle)` fails (`ok=false`), so it is a title-side
+> object the title's own worker should signal. The wait is therefore not
+> settable through HLE or Win32 from outside; it needs the title subsystem
+> that owns it.
 
 ## 1. Definition of done
 
